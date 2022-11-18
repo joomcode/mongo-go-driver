@@ -148,11 +148,11 @@ func testPollingSRVRecordsSpec(t *testing.T, uri string) {
 			topo, err := New(
 				WithConnString(func(connstring.ConnString) connstring.ConnString { return cs }),
 				WithURI(func(string) string { return cs.Original }),
+				WithRescanSRVInterval(func(time.Duration) time.Duration {return time.Millisecond*5}),
 			)
 			require.NoError(t, err, "Could not create the topology: %v", err)
 			mockRes := newMockResolver(tt.recordsToAdd, tt.recordsToRemove, tt.lookupFail, tt.lookupTimeout)
 			topo.dnsResolver = &dns.Resolver{mockRes.LookupSRV, mockRes.LookupTXT}
-			topo.rescanSRVInterval = time.Millisecond * 5
 			err = topo.Connect()
 			require.NoError(t, err, "Could not Connect to the topology: %v", err)
 
@@ -220,11 +220,12 @@ func TestPollSRVRecords(t *testing.T) {
 		topo, err := New(
 			WithConnString(func(connstring.ConnString) connstring.ConnString { return cs }),
 			WithURI(func(string) string { return cs.Original }),
+			WithRescanSRVInterval(func(time.Duration) time.Duration {return time.Millisecond*5}),
+
 		)
 		require.NoError(t, err, "Could not create the topology: %v", err)
 		mockRes := newMockResolver([]*net.SRV{{"blah.bleh", 27019, 0, 0}, {"localhost.test.build.10gen.cc.", 27020, 0, 0}}, nil, false, false)
 		topo.dnsResolver = &dns.Resolver{mockRes.LookupSRV, mockRes.LookupTXT}
-		topo.rescanSRVInterval = time.Millisecond * 5
 		err = topo.Connect()
 		require.NoError(t, err, "Could not Connect to the topology: %v", err)
 
@@ -304,7 +305,7 @@ func TestPollingSRVRecordsLoadBalanced(t *testing.T) {
 
 		topo := createLBTopology(t, "mongodb+srv://test3.test.build.10gen.cc")
 		topo.dnsResolver = dnsResolver
-		topo.rescanSRVInterval = time.Millisecond * 5
+		topo.cfg.rescanSRVInterval = time.Millisecond * 5
 		err := topo.Connect()
 		assert.Nil(t, err, "Connect error: %v", err)
 		defer func() {
@@ -313,7 +314,7 @@ func TestPollingSRVRecordsLoadBalanced(t *testing.T) {
 
 		// Wait for 2*rescanInterval and assert that polling was not done and the final host list only contains the
 		// original host.
-		time.Sleep(2 * topo.rescanSRVInterval)
+		time.Sleep(2 * topo.cfg.rescanSRVInterval)
 		lookupCalledTimes := atomic.LoadInt32(&mockResolver.ranLookup)
 		assert.Equal(t, int32(0), lookupCalledTimes, "expected SRV lookup to occur 0 times, got %d", lookupCalledTimes)
 		expectedHosts := []string{"localhost.test.build.10gen.cc:27017"}
@@ -337,12 +338,12 @@ func TestPollSRVRecordsMaxHosts(t *testing.T) {
 			WithConnString(func(connstring.ConnString) connstring.ConnString { return cs }),
 			WithURI(func(string) string { return cs.Original }),
 			WithSRVMaxHosts(func(int) int { return srvMaxHosts }),
+			WithRescanSRVInterval(func(time.Duration) time.Duration {return time.Millisecond*5}),
 		)
 		assert.Nil(t, err, "error during topology creation: %v", err)
 
 		mockRes := newMockResolver(recordsToAdd, recordsToRemove, false, false)
 		topo.dnsResolver = &dns.Resolver{mockRes.LookupSRV, mockRes.LookupTXT}
-		topo.rescanSRVInterval = time.Millisecond * 5
 		err = topo.Connect()
 		assert.Nil(t, err, "Connect error: %v", err)
 
@@ -415,12 +416,12 @@ func TestPollSRVRecordsServiceName(t *testing.T) {
 			WithConnString(func(connstring.ConnString) connstring.ConnString { return cs }),
 			WithURI(func(string) string { return cs.Original }),
 			WithSRVServiceName(func(string) string { return srvServiceName }),
+			WithRescanSRVInterval(func(time.Duration) time.Duration {return time.Millisecond*5}),
 		)
 		assert.Nil(t, err, "error during topology creation: %v", err)
 
 		mockRes := newMockResolver(recordsToAdd, recordsToRemove, false, false)
 		topo.dnsResolver = &dns.Resolver{mockRes.LookupSRV, mockRes.LookupTXT}
-		topo.rescanSRVInterval = time.Millisecond * 5
 		err = topo.Connect()
 		assert.Nil(t, err, "Connect error: %v", err)
 

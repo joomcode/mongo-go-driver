@@ -396,6 +396,12 @@ func (c *Client) configure(opts *options.ClientOptions) error {
 			}
 			return 0
 		}),
+		topology.WithRescanSRVInterval(func(duration time.Duration) time.Duration {
+			if opts.RescanSRVInterval != nil {
+				return *opts.RescanSRVInterval
+			}
+			return duration
+		}),
 	)
 
 	// AppName

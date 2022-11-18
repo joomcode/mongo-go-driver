@@ -39,12 +39,14 @@ type config struct {
 	srvMaxHosts            int
 	srvServiceName         string
 	loadBalanced           bool
+	rescanSRVInterval      time.Duration
 }
 
 func newConfig(opts ...Option) (*config, error) {
 	cfg := &config{
 		seedList:               []string{"localhost:27017"},
 		serverSelectionTimeout: 30 * time.Second,
+		rescanSRVInterval:      60 * time.Second,
 	}
 
 	for _, opt := range opts {
@@ -333,6 +335,14 @@ func WithSRVMaxHosts(fn func(int) int) Option {
 func WithSRVServiceName(fn func(string) string) Option {
 	return func(cfg *config) error {
 		cfg.srvServiceName = fn(cfg.srvServiceName)
+		return nil
+	}
+}
+
+// WithRescanSRVInterval specifies the interval between rescan SRV hosts list.
+func WithRescanSRVInterval(fn func(time.Duration) time.Duration) Option {
+	return func(cfg *config) error {
+		cfg.rescanSRVInterval = fn(cfg.rescanSRVInterval)
 		return nil
 	}
 }

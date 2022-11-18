@@ -124,6 +124,7 @@ type ClientOptions struct {
 	SocketTimeout            *time.Duration
 	SRVMaxHosts              *int
 	SRVServiceName           *string
+	RescanSRVInterval        *time.Duration
 	TLSConfig                *tls.Config
 	WriteConcern             *writeconcern.WriteConcern
 	ZlibLevel                *int
@@ -824,6 +825,12 @@ func (c *ClientOptions) SetSRVServiceName(srvName string) *ClientOptions {
 	return c
 }
 
+// SetRescanSRVInterval specifies a custom interval between SRV hosts rescan.
+func (c *ClientOptions) SetRescanSRVInterval(rescanSRVInterval time.Duration) *ClientOptions {
+	c.RescanSRVInterval = &rescanSRVInterval
+	return c
+}
+
 // MergeClientOptions combines the given *ClientOptions into a single *ClientOptions in a last one wins fashion.
 // The specified options are merged with the existing options on the client, with the specified options taking
 // precedence.
@@ -924,6 +931,9 @@ func MergeClientOptions(opts ...*ClientOptions) *ClientOptions {
 		}
 		if opt.SRVServiceName != nil {
 			c.SRVServiceName = opt.SRVServiceName
+		}
+		if opt.RescanSRVInterval != nil {
+			c.RescanSRVInterval = opt.RescanSRVInterval
 		}
 		if opt.TLSConfig != nil {
 			c.TLSConfig = opt.TLSConfig

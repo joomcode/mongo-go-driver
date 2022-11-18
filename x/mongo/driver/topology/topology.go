@@ -82,7 +82,6 @@ type Topology struct {
 	pollingRequired   bool
 	pollingDone       chan struct{}
 	pollingwg         sync.WaitGroup
-	rescanSRVInterval time.Duration
 	pollHeartbeatTime atomic.Value // holds a bool
 
 	updateCallback updateTopologyCallback
@@ -133,7 +132,6 @@ func New(opts ...Option) (*Topology, error) {
 		cfg:               cfg,
 		done:              make(chan struct{}),
 		pollingDone:       make(chan struct{}),
-		rescanSRVInterval: 60 * time.Second,
 		fsm:               newFSM(),
 		subscribers:       make(map[uint64]chan description.Topology),
 		servers:           make(map[address.Address]*Server),
@@ -575,7 +573,7 @@ func (t *Topology) pollSRVRecords(hosts string) {
 	serverConfig := newServerConfig(t.cfg.serverOpts...)
 	heartbeatInterval := serverConfig.heartbeatInterval
 
-	pollTicker := time.NewTicker(t.rescanSRVInterval)
+	pollTicker := time.NewTicker(t.cfg.rescanSRVInterval)
 	defer pollTicker.Stop()
 	t.pollHeartbeatTime.Store(false)
 	var doneOnce bool
@@ -610,7 +608,7 @@ func (t *Topology) pollSRVRecords(hosts string) {
 		}
 		if t.pollHeartbeatTime.Load().(bool) {
 			pollTicker.Stop()
-			pollTicker = time.NewTicker(t.rescanSRVInterval)
+			pollTicker = time.NewTicker(t.cfg.rescanSRVInterval)
 			t.pollHeartbeatTime.Store(false)
 		}
 
