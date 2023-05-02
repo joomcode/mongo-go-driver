@@ -35,7 +35,7 @@ build-tests:
 
 .PHONY: check-fmt
 check-fmt:
-	etc/check_fmt.sh $(PKGS)
+	etc/check_fmt.sh
 
 # check-modules runs "go mod tidy" then "go mod vendor" and exits with a non-zero exit code if there
 # are any module or vendored modules changes. The intent is to confirm two properties:
@@ -57,7 +57,7 @@ doc:
 
 .PHONY: fmt
 fmt:
-	gofmt -l -s -w $(PKGS)
+	go fmt ./...
 
 .PHONY: lint
 lint:
@@ -170,9 +170,9 @@ evg-test-versioned-api:
 		go test -exec "env PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH)" $(BUILD_TAGS) -v -timeout $(TEST_TIMEOUT)s $$TEST_PKG >> test.suite ; \
 	done
 
-.PHONY: build-gcpkms-test
-build-gcpkms-test:
-	go build $(BUILD_TAGS) ./cmd/testgcpkms
+.PHONY: build-kms-test
+build-kms-test:
+	go build $(BUILD_TAGS) ./cmd/testkms
 
 ### Benchmark specific targets and support. ###
 .PHONY: benchmark

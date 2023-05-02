@@ -14,18 +14,26 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
 
-// Unmarshaler is an interface implemented by types that can unmarshal a BSON
-// document representation of themselves. The BSON bytes can be assumed to be
-// valid. UnmarshalBSON must copy the BSON bytes if it wishes to retain the data
-// after returning.
+// Unmarshaler is the interface implemented by types that can unmarshal a BSON
+// document representation of themselves. The input can be assumed to be a valid
+// encoding of a BSON document. UnmarshalBSON must copy the JSON data if it
+// wishes to retain the data after returning.
+//
+// Unmarshaler is only used to unmarshal full BSON documents. To create custom
+// BSON unmarshaling behavior for individual values in a BSON document,
+// implement the ValueUnmarshaler interface instead.
 type Unmarshaler interface {
 	UnmarshalBSON([]byte) error
 }
 
-// ValueUnmarshaler is an interface implemented by types that can unmarshal a
-// BSON value representation of themselves. The BSON bytes and type can be
-// assumed to be valid. UnmarshalBSONValue must copy the BSON value bytes if it
-// wishes to retain the data after returning.
+// ValueUnmarshaler is the interface implemented by types that can unmarshal a
+// BSON value representation of themselves. The input can be assumed to be a
+// valid encoding of a BSON value. UnmarshalBSONValue must copy the BSON value
+// bytes if it wishes to retain the data after returning.
+//
+// ValueUnmarshaler is only used to unmarshal individual values in a BSON
+// document. To create custom BSON unmarshaling behavior for an entire BSON
+// document, implement the Unmarshaler interface instead.
 type ValueUnmarshaler interface {
 	UnmarshalBSONValue(bsontype.Type, []byte) error
 }
@@ -51,6 +59,23 @@ func UnmarshalWithRegistry(r *bsoncodec.Registry, data []byte, val interface{}) 
 func UnmarshalWithContext(dc bsoncodec.DecodeContext, data []byte, val interface{}) error {
 	vr := bsonrw.NewBSONDocumentReader(data)
 	return unmarshalFromReader(dc, vr, val)
+}
+
+// UnmarshalValue parses the BSON value of type t with bson.DefaultRegistry and
+// stores the result in the value pointed to by val. If val is nil or not a pointer,
+// UnmarshalValue returns an error.
+func UnmarshalValue(t bsontype.Type, data []byte, val interface{}) error {
+	return UnmarshalValueWithRegistry(DefaultRegistry, t, data, val)
+}
+
+// TODO(GODRIVER-2711): Deprecate UnmarshalValueWithRegistry with other *WithRegistry functions.
+
+// UnmarshalValueWithRegistry parses the BSON value of type t with registry r and
+// stores the result in the value pointed to by val. If val is nil or not a pointer,
+// UnmarshalValue returns an error.
+func UnmarshalValueWithRegistry(r *bsoncodec.Registry, t bsontype.Type, data []byte, val interface{}) error {
+	vr := bsonrw.NewBSONValueReader(t, data)
+	return unmarshalFromReader(bsoncodec.DecodeContext{Registry: r}, vr, val)
 }
 
 // UnmarshalExtJSON parses the extended JSON-encoded data and stores the result

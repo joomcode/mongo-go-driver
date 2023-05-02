@@ -136,11 +136,7 @@ func (db *Database) processRunCommand(ctx context.Context, cmd interface{},
 	cursorCommand bool, opts ...*options.RunCmdOptions) (*operation.Command, *session.Client, error) {
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		var err error
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return nil, sess, err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 	}
 
 	err := db.client.validSession(sess)
@@ -181,7 +177,7 @@ func (db *Database) processRunCommand(ctx context.Context, cmd interface{},
 		ServerSelector(readSelect).ClusterClock(db.client.clock).
 		Database(db.name).Deployment(db.client.deployment).ReadConcern(db.readConcern).
 		Crypt(db.client.cryptFLE).ReadPreference(ro.ReadPreference).ServerAPI(db.client.serverAPI).
-		Timeout(db.client.timeout), sess, nil
+		Timeout(db.client.timeout).Logger(db.client.logger), sess, nil
 }
 
 // RunCommand executes the given command against the database. This function does not obey the Database's read
@@ -211,6 +207,7 @@ func (db *Database) RunCommand(ctx context.Context, runCommand interface{}, opts
 	// RunCommand can be used to run a write, thus execute may return a write error
 	_, convErr := processWriteError(err)
 	return &SingleResult{
+		ctx: ctx,
 		err: convErr,
 		rdr: bson.Raw(op.Result()),
 		reg: db.registry,
@@ -265,11 +262,7 @@ func (db *Database) Drop(ctx context.Context) error {
 
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		var err error
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 		defer sess.EndSession()
 	}
 
@@ -366,10 +359,7 @@ func (db *Database) ListCollections(ctx context.Context, filter interface{}, opt
 
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return nil, err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 	}
 
 	err = db.client.validSession(sess)
@@ -589,7 +579,27 @@ func (db *Database) createCollectionWithEncryptedFields(ctx context.Context, nam
 		return fmt.Errorf("error transforming document: %v", err)
 	}
 
-	// Create the three encryption-related, associated collections: `escCollection`, `eccCollection` and `ecocCollection`.
+	// Check the wire version to ensure server is 7.0.0 or newer.
+	// After the wire version check, and before creating the collections, it is possible the server state changes.
+	// That is OK. This wire version check is a best effort to inform users earlier if using a QEv2 driver with a QEv1 server.
+	{
+		const QEv2WireVersion = 21
+		server, err := db.client.deployment.SelectServer(ctx, description.WriteSelector())
+		if err != nil {
+			return fmt.Errorf("error selecting server to check maxWireVersion: %w", err)
+		}
+		conn, err := server.Connection(ctx)
+		if err != nil {
+			return fmt.Errorf("error getting connection to check maxWireVersion: %w", err)
+		}
+		defer conn.Close()
+		wireVersionRange := conn.Description().WireVersion
+		if wireVersionRange.Max < QEv2WireVersion {
+			return fmt.Errorf("Driver support of Queryable Encryption is incompatible with server. Upgrade server to use Queryable Encryption. Got maxWireVersion %v but need maxWireVersion >= %v", wireVersionRange.Max, QEv2WireVersion)
+		}
+	}
+
+	// Create the two encryption-related, associated collections: `escCollection` and `ecocCollection`.
 
 	stateCollectionOpts := options.CreateCollection().
 		SetClusteredIndex(bson.D{{"key", bson.D{{"_id", 1}}}, {"unique", true}})
@@ -600,16 +610,6 @@ func (db *Database) createCollectionWithEncryptedFields(ctx context.Context, nam
 	}
 
 	if err := db.createCollection(ctx, escCollection, stateCollectionOpts); err != nil {
-		return err
-	}
-
-	// Create ECCCollection.
-	eccCollection, err := internal.GetEncryptedStateCollectionName(efBSON, name, internal.EncryptedCacheCollection)
-	if err != nil {
-		return err
-	}
-
-	if err := db.createCollection(ctx, eccCollection, stateCollectionOpts); err != nil {
 		return err
 	}
 
@@ -779,11 +779,7 @@ func (db *Database) CreateView(ctx context.Context, viewName, viewOn string, pip
 func (db *Database) executeCreateOperation(ctx context.Context, op *operation.Create) error {
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		var err error
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 		defer sess.EndSession()
 	}
 

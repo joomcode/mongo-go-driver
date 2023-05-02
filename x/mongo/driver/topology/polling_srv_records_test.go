@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -75,7 +75,7 @@ func (r *mockResolver) LookupSRV(service, proto, name string) (string, []*net.SR
 	return str, addresses, err
 }
 
-func (r *mockResolver) LookupTXT(name string) ([]string, error) { return nil, nil }
+func (r *mockResolver) LookupTXT(string) ([]string, error) { return nil, nil }
 
 var srvPollingTests = []struct {
 	name            string

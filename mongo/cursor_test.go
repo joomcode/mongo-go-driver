@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
 )
@@ -85,6 +85,8 @@ func (tbc *testBatchCursor) Close(context.Context) error {
 	tbc.closed = true
 	return nil
 }
+
+func (tbc *testBatchCursor) SetBatchSize(int32) {}
 
 func TestCursor(t *testing.T) {
 	t.Run("loops until docs available", func(t *testing.T) {})

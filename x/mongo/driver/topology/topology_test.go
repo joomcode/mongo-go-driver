@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/internal"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
@@ -583,7 +583,7 @@ func TestMinPoolSize(t *testing.T) {
 	}
 }
 
-func TestTopology_String_Race(t *testing.T) {
+func TestTopology_String_Race(_ *testing.T) {
 	ch := make(chan bool)
 	topo := &Topology{
 		servers: make(map[address.Address]*Server),

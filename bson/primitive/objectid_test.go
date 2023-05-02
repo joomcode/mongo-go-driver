@@ -14,14 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/require"
 )
-
-func TestNew(t *testing.T) {
-	// Ensure that objectid.NewObjectID() doesn't panic.
-	NewObjectID()
-}
 
 func TestString(t *testing.T) {
 	id := NewObjectID()

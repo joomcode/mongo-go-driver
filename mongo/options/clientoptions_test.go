@@ -28,7 +28,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
 	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/internal"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
@@ -573,6 +573,15 @@ func TestClientOptions(t *testing.T) {
 				"mongodb://localhost/?tlsCertificateKeyFile=testdata/one-pk-multiple-certs.pem",
 				baseClient().SetTLSConfig(&tls.Config{Certificates: make([]tls.Certificate, 1)}),
 			},
+			{
+				"GODRIVER-2650 X509 certificate",
+				"mongodb://localhost/?ssl=true&authMechanism=mongodb-x509&sslClientCertificateKeyFile=testdata/one-pk-multiple-certs.pem",
+				baseClient().SetAuth(Credential{
+					AuthMechanism: "mongodb-x509", AuthSource: "$external",
+					// Subject name in the first certificate is used as the username for X509 auth.
+					Username: `C=US,ST=New York,L=New York City,O=MongoDB,OU=Drivers,CN=localhost`,
+				}).SetTLSConfig(&tls.Config{Certificates: make([]tls.Certificate, 1)}),
+			},
 		}
 
 		for _, tc := range testCases {
@@ -787,7 +796,7 @@ type testDialer struct {
 	Num int
 }
 
-func (testDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+func (testDialer) DialContext(context.Context, string, string) (net.Conn, error) {
 	return nil, nil
 }
 

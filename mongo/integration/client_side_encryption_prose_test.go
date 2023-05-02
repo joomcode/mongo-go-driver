@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,13 +29,15 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/internal/testutil"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/mongocrypt"
+	mongocryptopts "go.mongodb.org/mongo-driver/x/mongo/driver/mongocrypt/options"
 )
 
 var (
@@ -81,7 +84,6 @@ func TestClientSideEncryptionProse(t *testing.T) {
 		},
 	}
 
-	runOpts := mtest.NewOptions().MinServerVersion("6.0").Topologies(mtest.ReplicaSet, mtest.LoadBalanced, mtest.ShardedReplicaSet)
 	mt.Run("1. custom key material test", func(mt *mtest.T) {
 		const (
 			dkCollection = "datakeys"
@@ -1140,7 +1142,9 @@ func TestClientSideEncryptionProse(t *testing.T) {
 					// Insert already encrypted data and verify that it is automatically decrypted by Next().
 					insertDocuments(mt, cpt.coll, []bson.Raw{testConfig.EncryptedDocument})
 					assert.True(mt, stream.Next(context.Background()), "expected Next to return true, got false")
-					gotDocument := stream.Current.Lookup("fullDocument").Document()
+					gotValue, err := stream.Current.LookupErr("fullDocument")
+					assert.Nil(mt, err, "did not find fullDocument in stream.Current: %v", stream.Current)
+					gotDocument := gotValue.Document()
 					err = compareDocs(mt, testConfig.DecryptedDocument, gotDocument)
 					assert.Nil(mt, err, "compareDocs error: %v", err)
 				})
@@ -1558,7 +1562,14 @@ func TestClientSideEncryptionProse(t *testing.T) {
 			})
 		}
 	})
+	runOpts := mtest.NewOptions().MinServerVersion("7.0").Topologies(mtest.ReplicaSet, mtest.LoadBalanced, mtest.ShardedReplicaSet)
+	// Only test MongoDB Server 7.0+. MongoDB Server 7.0 introduced a backwards breaking change to the Queryable Encryption (QE) protocol: QEv2.
+	// libmongocrypt is configured to use the QEv2 protocol.
 	mt.RunOpts("12. explicit encryption", runOpts, func(mt *mtest.T) {
+		if mtest.Serverless() {
+			// Skip tests if running against serverless, as capped collections are banned.
+			mt.Skip("Queryable Encryption tests are skipped on serverless until QEv2 protocol is enabled on serverless by default: DRIVERS-2589")
+		}
 		// Test Setup ... begin
 		encryptedFields := readJSONFile(mt, "encrypted-fields.json")
 		key1Document := readJSONFile(mt, "key1-document.json")
@@ -1575,10 +1586,10 @@ func TestClientSideEncryptionProse(t *testing.T) {
 			assert.Nil(mt, err, "error on CreateCollection: %v", err)
 			err = mt.Client.Database("keyvault").Collection("datakeys").Drop(context.Background())
 			assert.Nil(mt, err, "error on Drop: %v", err)
-			keyVaultClient, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(mtest.ClusterURI()))
+			keyVaultClient, err := mongo.Connect(context.Background(), options.Client().ApplyURI(mtest.ClusterURI()))
 			assert.Nil(mt, err, "error on Connect: %v", err)
 			datakeysColl := keyVaultClient.Database("keyvault").Collection("datakeys", options.Collection().SetWriteConcern(mtest.MajorityWc))
-			_, err = datakeysColl.InsertOne(context.TODO(), key1Document)
+			_, err = datakeysColl.InsertOne(context.Background(), key1Document)
 			assert.Nil(mt, err, "error on InsertOne: %v", err)
 			// Create a ClientEncryption.
 			ceo := options.ClientEncryption().
@@ -1780,7 +1791,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 			wcMajority := writeconcern.New(writeconcern.WMajority(), writeconcern.WTimeout(1*time.Second))
 			wcMajorityCollectionOpts := options.Collection().SetWriteConcern(wcMajority)
 			wcmColl := cse.kvClient.Database(kvDatabase).Collection(dkCollection, wcMajorityCollectionOpts)
-			_, err = wcmColl.Indexes().CreateOne(context.TODO(), keyVaultIndex)
+			_, err = wcmColl.Indexes().CreateOne(context.Background(), keyVaultIndex)
 			assert.Nil(mt, err, "error creating keyAltNames index: %v", err)
 
 			// Using client_encryption, create a data key with a local KMS provider and the keyAltName "def".
@@ -2014,6 +2025,100 @@ func TestClientSideEncryptionProse(t *testing.T) {
 		})
 	})
 
+	mt.RunOpts("18. Azure IMDS Credentials", noClientOpts, func(mt *mtest.T) {
+		buf := make([]byte, 0, 256)
+		kmsProvidersMap := map[string]map[string]interface{}{
+			"azure": {},
+		}
+		p, err := bson.MarshalAppend(buf[:0], kmsProvidersMap)
+		assert.Nil(mt, err, "error in MarshalAppendWithRegistry: %v", err)
+
+		getClient := func(header http.Header) *http.Client {
+			lt := &localTransport{
+				header: header,
+				rt:     http.DefaultTransport,
+			}
+			return &http.Client{
+				Timeout:   30 * time.Second,
+				Transport: lt,
+			}
+		}
+
+		mt.Run("Case 1: Success", func(mt *mtest.T) {
+			opts := &mongocryptopts.MongoCryptOptions{
+				KmsProviders: p,
+				HTTPClient:   getClient(nil),
+			}
+			crypt, err := mongocrypt.NewMongoCrypt(opts)
+			assert.Nil(mt, err, "error in NewMongoCrypt: %v", err)
+			doc, err := crypt.GetKmsProviders(context.Background())
+			assert.Nil(mt, err, "error in GetKmsProviders: %v", err)
+			val, err := doc.LookupErr("azure")
+			assert.Nil(mt, err, "error in LookupErr: %v", err)
+			assert.Equal(mt, `{"accessToken": "magic-cookie"}`, val.String(), "expected accessToken, got %s", val.String())
+		})
+		mt.Run("Case 2: Empty JSON", func(mt *mtest.T) {
+			header := make(http.Header)
+			header.Set("X-MongoDB-HTTP-TestParams", "case=empty-json")
+			opts := &mongocryptopts.MongoCryptOptions{
+				KmsProviders: p,
+				HTTPClient:   getClient(header),
+			}
+			crypt, err := mongocrypt.NewMongoCrypt(opts)
+			assert.Nil(mt, err, "error in NewMongoCrypt: %v", err)
+			_, err = crypt.GetKmsProviders(context.Background())
+			assert.ErrorContains(mt, err, "got unexpected empty accessToken")
+		})
+		mt.Run("Case 3: Bad JSON", func(mt *mtest.T) {
+			header := make(http.Header)
+			header.Set("X-MongoDB-HTTP-TestParams", "case=bad-json")
+			opts := &mongocryptopts.MongoCryptOptions{
+				KmsProviders: p,
+				HTTPClient:   getClient(header),
+			}
+			crypt, err := mongocrypt.NewMongoCrypt(opts)
+			assert.Nil(mt, err, "error in NewMongoCrypt: %v", err)
+			_, err = crypt.GetKmsProviders(context.Background())
+			assert.ErrorContains(mt, err, "error reading body JSON")
+		})
+		mt.Run("Case 4: HTTP 404", func(mt *mtest.T) {
+			header := make(http.Header)
+			header.Set("X-MongoDB-HTTP-TestParams", "case=404")
+			opts := &mongocryptopts.MongoCryptOptions{
+				KmsProviders: p,
+				HTTPClient:   getClient(header),
+			}
+			crypt, err := mongocrypt.NewMongoCrypt(opts)
+			assert.Nil(mt, err, "error in NewMongoCrypt: %v", err)
+			_, err = crypt.GetKmsProviders(context.Background())
+			assert.ErrorContains(mt, err, "got StatusCode: 404")
+		})
+		mt.Run("Case 5: HTTP 500", func(mt *mtest.T) {
+			header := make(http.Header)
+			header.Set("X-MongoDB-HTTP-TestParams", "case=500")
+			opts := &mongocryptopts.MongoCryptOptions{
+				KmsProviders: p,
+				HTTPClient:   getClient(header),
+			}
+			crypt, err := mongocrypt.NewMongoCrypt(opts)
+			assert.Nil(mt, err, "error in NewMongoCrypt: %v", err)
+			_, err = crypt.GetKmsProviders(context.Background())
+			assert.ErrorContains(mt, err, "got StatusCode: 500")
+		})
+		mt.Run("Case 6: Slow Response", func(mt *mtest.T) {
+			header := make(http.Header)
+			header.Set("X-MongoDB-HTTP-TestParams", "case=slow")
+			opts := &mongocryptopts.MongoCryptOptions{
+				KmsProviders: p,
+				HTTPClient:   getClient(header),
+			}
+			crypt, err := mongocrypt.NewMongoCrypt(opts)
+			assert.Nil(mt, err, "error in NewMongoCrypt: %v", err)
+			_, err = crypt.GetKmsProviders(context.Background())
+			assert.ErrorContains(mt, err, "Client.Timeout or context cancellation while reading body")
+		})
+	})
+
 	mt.RunOpts("20. Bypass creating mongocryptd client when shared library is loaded",
 		noClientOpts, func(mt *mtest.T) {
 			cryptSharedLibPath := os.Getenv("CRYPT_SHARED_LIB_PATH")
@@ -2057,6 +2162,634 @@ func TestClientSideEncryptionProse(t *testing.T) {
 			_, err = encClient.Database("db").Collection("coll").InsertOne(context.Background(), bson.D{{"unencrypted", "test"}})
 			assert.Nil(mt, err, "InsertOne error: %v", err)
 		})
+
+	// qeRunOpts are requirements for Queryable Encryption.
+	qeRunOpts := mtest.NewOptions().MinServerVersion("7.0").Topologies(mtest.ReplicaSet, mtest.Sharded, mtest.LoadBalanced, mtest.ShardedReplicaSet)
+	// Only test MongoDB Server 7.0+. MongoDB Server 7.0 introduced a backwards breaking change to the Queryable Encryption (QE) protocol: QEv2.
+	// libmongocrypt is configured to use the QEv2 protocol.
+	mt.RunOpts("21. automatic data encryption keys", qeRunOpts, func(mt *mtest.T) {
+		if mtest.Serverless() {
+			// Skip tests if running against serverless, as capped collections are banned.
+			mt.Skip("Queryable Encryption tests are skipped on serverless until QEv2 protocol is enabled on serverless by default: DRIVERS-2589")
+		}
+		setup := func() (*mongo.Client, *mongo.ClientEncryption, error) {
+			opts := options.Client().ApplyURI(mtest.ClusterURI())
+			client, err := mongo.Connect(context.Background(), opts)
+			if err != nil {
+				return nil, nil, err
+			}
+			client.Database("keyvault").Collection("datakeys").Drop(context.Background())
+			client.Database("db").Drop(context.Background())
+			ceo := options.ClientEncryption().
+				SetKmsProviders(fullKmsProvidersMap).
+				SetKeyVaultNamespace(kvNamespace)
+			clientEnc, err := mongo.NewClientEncryption(client, ceo)
+			if err != nil {
+				return nil, nil, err
+			}
+			return client, clientEnc, nil
+		}
+
+		type KMSProviderTestcase struct {
+			kmsProvider string
+			masterKey   *bson.D
+		}
+
+		testcases := []KMSProviderTestcase{
+			{
+				kmsProvider: "local",
+				masterKey:   nil,
+			},
+			{
+				kmsProvider: "aws",
+				masterKey: &bson.D{
+					{"region", "us-east-1"},
+					{"key", "arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0"},
+				},
+			},
+		}
+
+		for _, tc := range testcases {
+			mt.Run(tc.kmsProvider, func(mt *mtest.T) {
+
+				mt.Run("case 1: simple creation and validation", func(mt *mtest.T) {
+					client, clientEnc, err := setup()
+					assert.Nil(mt, err, "setup error: %v", err)
+					defer func() {
+						err := clientEnc.Close(context.Background())
+						assert.Nil(mt, err, "error in Close")
+					}()
+
+					var encryptedFields bson.Raw
+					err = bson.UnmarshalExtJSON([]byte(`{
+				"fields": [{
+					"path": "ssn",
+					"bsonType": "string",
+					"keyId": null
+				}]
+			}`), true /* canonical */, &encryptedFields)
+					assert.Nil(mt, err, "Unmarshal error: %v", err)
+
+					coll, _, err := clientEnc.CreateEncryptedCollection(
+						context.Background(),
+						client.Database("db"),
+						"testing1", options.CreateCollection().SetEncryptedFields(encryptedFields),
+						"local", nil,
+					)
+					assert.Nil(mt, err, "CreateCollection error: %v", err)
+
+					_, err = coll.InsertOne(context.Background(), bson.D{{"ssn", "123-45-6789"}})
+					assert.ErrorContains(mt, err, "Document failed validation")
+				})
+				mt.Run("case 2: missing encryptedFields", func(mt *mtest.T) {
+					client, clientEnc, err := setup()
+					assert.Nil(mt, err, "setup error: %v", err)
+					defer func() {
+						err := clientEnc.Close(context.Background())
+						assert.Nil(mt, err, "error in Close")
+					}()
+
+					coll, _, err := clientEnc.CreateEncryptedCollection(
+						context.Background(),
+						client.Database("db"),
+						"testing1", options.CreateCollection(),
+						"local", nil,
+					)
+					assert.Nil(mt, coll, "expect nil collection")
+					assert.EqualError(mt, err, "no EncryptedFields defined for the collection")
+				})
+				mt.Run("case 3: invalid keyId", func(mt *mtest.T) {
+					client, clientEnc, err := setup()
+					assert.Nil(mt, err, "setup error: %v", err)
+					defer func() {
+						err := clientEnc.Close(context.Background())
+						assert.Nil(mt, err, "error in Close")
+					}()
+
+					var encryptedFields bson.Raw
+					err = bson.UnmarshalExtJSON([]byte(`{
+				"fields": [{
+					"path": "ssn",
+					"bsonType": "string",
+					"keyId": false
+				}]
+			}`), true /* canonical */, &encryptedFields)
+					assert.Nil(mt, err, "Unmarshal error: %v", err)
+
+					_, _, err = clientEnc.CreateEncryptedCollection(
+						context.Background(),
+						client.Database("db"),
+						"testing1", options.CreateCollection().SetEncryptedFields(encryptedFields),
+						"local", nil,
+					)
+					assert.ErrorContains(mt, err, "BSON field 'create.encryptedFields.fields.keyId' is the wrong type 'bool', expected type 'binData'")
+				})
+				mt.Run("case 4: insert encrypted value", func(mt *mtest.T) {
+					client, clientEnc, err := setup()
+					assert.Nil(mt, err, "setup error: %v", err)
+					defer func() {
+						err := clientEnc.Close(context.Background())
+						assert.Nil(mt, err, "error in Close")
+					}()
+
+					var encryptedFields bson.Raw
+					err = bson.UnmarshalExtJSON([]byte(`{
+				"fields": [{
+					"path": "ssn",
+					"bsonType": "string",
+					"keyId": null
+				}]
+			}`), true /* canonical */, &encryptedFields)
+					assert.Nil(mt, err, "Unmarshal error: %v", err)
+
+					coll, ef, err := clientEnc.CreateEncryptedCollection(
+						context.Background(),
+						client.Database("db"),
+						"testing1", options.CreateCollection().SetEncryptedFields(encryptedFields),
+						"local", nil,
+					)
+					assert.Nil(mt, err, "CreateCollection error: %v", err)
+
+					keyid := ef["fields"].(bson.A)[0].(bson.M)["keyId"].(primitive.Binary)
+					rawValueType, rawValueData, err := bson.MarshalValue("123-45-6789")
+					assert.Nil(mt, err, "MarshalValue error: %v", err)
+					rawValue := bson.RawValue{Type: rawValueType, Value: rawValueData}
+					encryptionOpts := options.Encrypt().
+						SetAlgorithm("Unindexed").
+						SetKeyID(keyid)
+					encryptedField, err := clientEnc.Encrypt(
+						context.Background(),
+						rawValue,
+						encryptionOpts)
+					assert.Nil(mt, err, "Encrypt error: %v", err)
+
+					_, err = coll.InsertOne(context.Background(), bson.D{{"ssn", encryptedField}})
+					assert.Nil(mt, err, "InsertOne error: %v", err)
+				})
+			})
+		}
+	})
+
+	// Only test MongoDB Server 7.0+. MongoDB Server 7.0 introduced a backwards breaking change to the Queryable Encryption (QE) protocol: QEv2.
+	// libmongocrypt is configured to use the QEv2 protocol.
+	mt.RunOpts("22. range explicit encryption", qeRunOpts, func(mt *mtest.T) {
+		if mtest.Serverless() {
+			// Skip tests if running against serverless, as capped collections are banned.
+			mt.Skip("Queryable Encryption tests are skipped on serverless until QEv2 protocol is enabled on serverless by default: DRIVERS-2589")
+		}
+		type testcase struct {
+			typeStr       string
+			field         string
+			typeBson      bsontype.Type
+			rangeOpts     options.RangeOptions
+			zero          bson.RawValue
+			six           bson.RawValue
+			thirty        bson.RawValue
+			twoHundred    bson.RawValue
+			twoHundredOne bson.RawValue
+		}
+
+		precision := int32(2)
+
+		d128_0, err := primitive.ParseDecimal128("0")
+		assert.Nil(mt, err)
+		d128_6, err := primitive.ParseDecimal128("6")
+		assert.Nil(mt, err)
+		d128_30, err := primitive.ParseDecimal128("30")
+		assert.Nil(mt, err)
+		d128_200, err := primitive.ParseDecimal128("200")
+		assert.Nil(mt, err)
+		d128_201, err := primitive.ParseDecimal128("201")
+		assert.Nil(mt, err)
+
+		tests := []testcase{
+			{
+				typeStr:  "DecimalNoPrecision",
+				field:    "encryptedDecimalNoPrecision",
+				typeBson: bson.TypeDecimal128,
+				rangeOpts: options.RangeOptions{
+					Sparsity: 1,
+				},
+				zero:          bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_0)},
+				six:           bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_6)},
+				thirty:        bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_30)},
+				twoHundred:    bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_200)},
+				twoHundredOne: bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_201)},
+			},
+			{
+				typeStr:  "DecimalPrecision",
+				field:    "encryptedDecimalPrecision",
+				typeBson: bson.TypeDecimal128,
+				rangeOpts: options.RangeOptions{
+					Min:       &bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_0)},
+					Max:       &bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_200)},
+					Sparsity:  1,
+					Precision: &precision,
+				},
+				zero:          bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_0)},
+				six:           bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_6)},
+				thirty:        bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_30)},
+				twoHundred:    bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_200)},
+				twoHundredOne: bson.RawValue{Type: bson.TypeDecimal128, Value: bsoncore.AppendDecimal128(nil, d128_201)},
+			},
+			{
+				typeStr:  "DoubleNoPrecision",
+				field:    "encryptedDoubleNoPrecision",
+				typeBson: bson.TypeDouble,
+				rangeOpts: options.RangeOptions{
+					Sparsity: 1,
+				},
+				zero:          bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 0)},
+				six:           bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 6)},
+				thirty:        bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 30)},
+				twoHundred:    bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 200)},
+				twoHundredOne: bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 201)},
+			},
+			{
+				typeStr:  "DoublePrecision",
+				field:    "encryptedDoublePrecision",
+				typeBson: bson.TypeDouble,
+				rangeOpts: options.RangeOptions{
+					Min:       &bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 0)},
+					Max:       &bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 200)},
+					Sparsity:  1,
+					Precision: &precision,
+				},
+				zero:          bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 0)},
+				six:           bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 6)},
+				thirty:        bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 30)},
+				twoHundred:    bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 200)},
+				twoHundredOne: bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 201)},
+			},
+			{
+				typeStr:  "Date",
+				field:    "encryptedDate",
+				typeBson: bson.TypeDateTime,
+				rangeOpts: options.RangeOptions{
+					Min:      &bson.RawValue{Type: bson.TypeDateTime, Value: bsoncore.AppendDateTime(nil, 0)},
+					Max:      &bson.RawValue{Type: bson.TypeDateTime, Value: bsoncore.AppendDateTime(nil, 200)},
+					Sparsity: 1,
+				},
+				zero:          bson.RawValue{Type: bson.TypeDateTime, Value: bsoncore.AppendDateTime(nil, 0)},
+				six:           bson.RawValue{Type: bson.TypeDateTime, Value: bsoncore.AppendDateTime(nil, 6)},
+				thirty:        bson.RawValue{Type: bson.TypeDateTime, Value: bsoncore.AppendDateTime(nil, 30)},
+				twoHundred:    bson.RawValue{Type: bson.TypeDateTime, Value: bsoncore.AppendDateTime(nil, 200)},
+				twoHundredOne: bson.RawValue{Type: bson.TypeDateTime, Value: bsoncore.AppendDateTime(nil, 201)},
+			},
+			{
+				typeStr:  "Int",
+				field:    "encryptedInt",
+				typeBson: bson.TypeInt32,
+				rangeOpts: options.RangeOptions{
+					Min:      &bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 0)},
+					Max:      &bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 200)},
+					Sparsity: 1,
+				},
+				zero:          bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 0)},
+				six:           bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 6)},
+				thirty:        bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 30)},
+				twoHundred:    bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 200)},
+				twoHundredOne: bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 201)},
+			},
+			{
+				typeStr:  "Long",
+				field:    "encryptedLong",
+				typeBson: bson.TypeInt64,
+				rangeOpts: options.RangeOptions{
+					Min:      &bson.RawValue{Type: bson.TypeInt64, Value: bsoncore.AppendInt64(nil, 0)},
+					Max:      &bson.RawValue{Type: bson.TypeInt64, Value: bsoncore.AppendInt64(nil, 200)},
+					Sparsity: 1,
+				},
+				zero:          bson.RawValue{Type: bson.TypeInt64, Value: bsoncore.AppendInt64(nil, 0)},
+				six:           bson.RawValue{Type: bson.TypeInt64, Value: bsoncore.AppendInt64(nil, 6)},
+				thirty:        bson.RawValue{Type: bson.TypeInt64, Value: bsoncore.AppendInt64(nil, 30)},
+				twoHundred:    bson.RawValue{Type: bson.TypeInt64, Value: bsoncore.AppendInt64(nil, 200)},
+				twoHundredOne: bson.RawValue{Type: bson.TypeInt64, Value: bsoncore.AppendInt64(nil, 201)},
+			},
+		}
+
+		for _, test := range tests {
+			mt.Run(test.typeStr, func(mt *mtest.T) {
+				if test.typeStr == "DecimalNoPrecision" && mtest.ClusterTopologyKind() != mtest.ReplicaSet {
+					mt.Skipf("Skipping DecimalNoPrecision tests on a non ReplicaSet topology. DecimalNoPrecision queries are expected to take a long time and may exceed the default mongos timeout")
+				}
+
+				// Test Setup ... begin
+				encryptedFields := readJSONFile(mt, fmt.Sprintf("range-encryptedFields-%v.json", test.typeStr))
+				key1Document := readJSONFile(mt, "key1-document.json")
+				var key1ID primitive.Binary
+				{
+					subtype, data := key1Document.Lookup("_id").Binary()
+					key1ID = primitive.Binary{Subtype: subtype, Data: data}
+				}
+
+				testSetup := func() (*mongo.Client, *mongo.ClientEncryption) {
+					mtest.DropEncryptedCollection(mt, mt.Client.Database("db").Collection("explicit_encryption"), encryptedFields)
+					cco := options.CreateCollection().SetEncryptedFields(encryptedFields)
+					err := mt.Client.Database("db").CreateCollection(context.Background(), "explicit_encryption", cco)
+					assert.Nil(mt, err, "error on CreateCollection: %v", err)
+					err = mt.Client.Database("keyvault").Collection("datakeys").Drop(context.Background())
+					assert.Nil(mt, err, "error on Drop: %v", err)
+					keyVaultClient, err := mongo.Connect(context.Background(), options.Client().ApplyURI(mtest.ClusterURI()))
+					assert.Nil(mt, err, "error on Connect: %v", err)
+					datakeysColl := keyVaultClient.Database("keyvault").Collection("datakeys", options.Collection().SetWriteConcern(mtest.MajorityWc))
+					_, err = datakeysColl.InsertOne(context.Background(), key1Document)
+					assert.Nil(mt, err, "error on InsertOne: %v", err)
+					// Create a ClientEncryption.
+					ceo := options.ClientEncryption().
+						SetKeyVaultNamespace("keyvault.datakeys").
+						SetKmsProviders(fullKmsProvidersMap)
+					clientEncryption, err := mongo.NewClientEncryption(keyVaultClient, ceo)
+					assert.Nil(mt, err, "error on NewClientEncryption: %v", err)
+
+					// Create a MongoClient with AutoEncryptionOpts and bypassQueryAnalysis=true.
+					aeo := options.AutoEncryption().
+						SetKeyVaultNamespace("keyvault.datakeys").
+						SetKmsProviders(fullKmsProvidersMap).
+						SetBypassQueryAnalysis(true)
+					co := options.Client().SetAutoEncryptionOptions(aeo).ApplyURI(mtest.ClusterURI())
+					encryptedClient, err := mongo.Connect(context.Background(), co)
+					assert.Nil(mt, err, "error on Connect: %v", err)
+
+					// Insert 0, 6, 30, and 200.
+					coll := encryptedClient.Database("db").Collection("explicit_encryption")
+					eo := options.Encrypt().
+						SetAlgorithm("RangePreview").
+						SetKeyID(key1ID).
+						SetContentionFactor(0).
+						SetRangeOptions(test.rangeOpts)
+					// Insert 0.
+					insertPayloadZero, err := clientEncryption.Encrypt(context.Background(), test.zero, eo)
+					assert.Nil(mt, err, "error in Encrypt: %v", err)
+					_, err = coll.InsertOne(context.Background(), bson.D{{"_id", 0}, {test.field, insertPayloadZero}})
+					assert.Nil(mt, err, "error in InsertOne: %v", err)
+					// Insert 6.
+					insertPayloadSix, err := clientEncryption.Encrypt(context.Background(), test.six, eo)
+					assert.Nil(mt, err, "error in Encrypt: %v", err)
+					_, err = coll.InsertOne(context.Background(), bson.D{{"_id", 1}, {test.field, insertPayloadSix}})
+					assert.Nil(mt, err, "error in InsertOne: %v", err)
+					// Insert 30.
+					insertPayloadThirty, err := clientEncryption.Encrypt(context.Background(), test.thirty, eo)
+					assert.Nil(mt, err, "error in Encrypt: %v", err)
+					_, err = coll.InsertOne(context.Background(), bson.D{{"_id", 2}, {test.field, insertPayloadThirty}})
+					assert.Nil(mt, err, "error in InsertOne: %v", err)
+					// Insert 200.
+					insertPayloadTwoHundred, err := clientEncryption.Encrypt(context.Background(), test.twoHundred, eo)
+					assert.Nil(mt, err, "error in Encrypt: %v", err)
+					_, err = coll.InsertOne(context.Background(), bson.D{{"_id", 3}, {test.field, insertPayloadTwoHundred}})
+					assert.Nil(mt, err, "error in InsertOne: %v", err)
+
+					return encryptedClient, clientEncryption
+				}
+				// Test Setup ... end
+
+				// checkCursorResults checks documents returned by a cursor.
+				// Expects document i to have field `field` with value `values[i]`.
+				// Expects exactly len(values) documents to be returned.
+				checkCursorResults := func(cursor *mongo.Cursor, field string, values ...bson.RawValue) {
+					for i, v := range values {
+						assert.True(mt, cursor.Next(context.Background()), "expected Next true, got false. Expected document %v with value: %v", i, v)
+						got, err := cursor.Current.LookupErr(test.field)
+						assert.Nil(mt, err, "%v not found in document %v: %v", test.field, i, cursor.Current)
+						assert.Equal(mt, v, got, "expected %v, got %v in document %v", v, got, i)
+					}
+					assert.False(mt, cursor.Next(context.Background()), "expected Next false, got true with document: %v", cursor.Current)
+				}
+
+				mt.Run("Case 1: can decrypt a payload", func(mt *mtest.T) {
+					encryptedClient, clientEncryption := testSetup()
+					defer clientEncryption.Close(context.Background())
+					defer encryptedClient.Disconnect(context.Background())
+					eo := options.Encrypt().
+						SetAlgorithm("RangePreview").
+						SetKeyID(key1ID).
+						SetContentionFactor(0).
+						SetRangeOptions(test.rangeOpts)
+					insertPayloadSix, err := clientEncryption.Encrypt(context.Background(), test.six, eo)
+					assert.Nil(mt, err, "error in Encrypt: %v", err)
+					got, err := clientEncryption.Decrypt(context.Background(), insertPayloadSix)
+					assert.Nil(mt, err, "error in Decrypt: %v", err)
+					assert.Equal(mt, test.six, got, "expected %v, got %v", test.six, got)
+				})
+
+				mt.Run("Case 2: can find encrypted range and return the maximum", func(mt *mtest.T) {
+					encryptedClient, clientEncryption := testSetup()
+					defer clientEncryption.Close(context.Background())
+					defer encryptedClient.Disconnect(context.Background())
+					eo := options.Encrypt().
+						SetAlgorithm("RangePreview").
+						SetKeyID(key1ID).
+						SetContentionFactor(0).
+						SetQueryType("rangePreview").
+						SetRangeOptions(test.rangeOpts)
+
+					expr := bson.M{
+						"$and": bson.A{
+							bson.M{
+								test.field: bson.M{
+									"$gte": test.six,
+								},
+							},
+							bson.M{
+								test.field: bson.M{
+									"$lte": test.twoHundred,
+								},
+							},
+						},
+					}
+
+					// Encrypt.
+					var encryptedExpr bson.Raw
+					{
+						err := clientEncryption.EncryptExpression(context.Background(), expr, &encryptedExpr, eo)
+						assert.Nil(mt, err, "error in EncryptExpression: %v", err)
+					}
+
+					coll := encryptedClient.Database("db").Collection("explicit_encryption")
+					opts := options.Find().SetSort(bson.D{{"_id", 1}})
+					cursor, err := coll.Find(context.Background(), encryptedExpr, opts)
+					assert.Nil(mt, err, "error in coll.Find: %v", err)
+					defer cursor.Close(context.Background())
+
+					checkCursorResults(cursor, test.field, test.six, test.thirty, test.twoHundred)
+				})
+
+				mt.Run("Case 3: can find encrypted range and return the minimum", func(mt *mtest.T) {
+					encryptedClient, clientEncryption := testSetup()
+					defer clientEncryption.Close(context.Background())
+					defer encryptedClient.Disconnect(context.Background())
+					eo := options.Encrypt().
+						SetAlgorithm("RangePreview").
+						SetKeyID(key1ID).
+						SetContentionFactor(0).
+						SetQueryType("rangePreview").
+						SetRangeOptions(test.rangeOpts)
+
+					expr := bson.M{
+						"$and": bson.A{
+							bson.M{
+								test.field: bson.M{
+									"$gte": test.zero,
+								},
+							},
+							bson.M{
+								test.field: bson.M{
+									"$lte": test.six,
+								},
+							},
+						},
+					}
+
+					// Encrypt.
+					var encryptedExpr bson.Raw
+					{
+						err := clientEncryption.EncryptExpression(context.Background(), expr, &encryptedExpr, eo)
+						assert.Nil(mt, err, "error in EncryptExpression: %v", err)
+					}
+
+					coll := encryptedClient.Database("db").Collection("explicit_encryption")
+					opts := options.Find().SetSort(bson.D{{"_id", 1}})
+					cursor, err := coll.Find(context.Background(), encryptedExpr, opts)
+					assert.Nil(mt, err, "error in coll.Find: %v", err)
+					defer cursor.Close(context.Background())
+
+					checkCursorResults(cursor, test.field, test.zero, test.six)
+				})
+
+				mt.Run("Case 4: can find encrypted range with an open range query", func(mt *mtest.T) {
+					encryptedClient, clientEncryption := testSetup()
+					defer clientEncryption.Close(context.Background())
+					defer encryptedClient.Disconnect(context.Background())
+					eo := options.Encrypt().
+						SetAlgorithm("RangePreview").
+						SetKeyID(key1ID).
+						SetContentionFactor(0).
+						SetQueryType("rangePreview").
+						SetRangeOptions(test.rangeOpts)
+
+					expr := bson.M{
+						"$and": bson.A{
+							bson.M{
+								test.field: bson.M{
+									"$gt": test.thirty,
+								},
+							},
+						},
+					}
+
+					// Encrypt.
+					var encryptedExpr bson.Raw
+					{
+						err := clientEncryption.EncryptExpression(context.Background(), expr, &encryptedExpr, eo)
+						assert.Nil(mt, err, "error in EncryptExpression: %v", err)
+					}
+
+					coll := encryptedClient.Database("db").Collection("explicit_encryption")
+					opts := options.Find().SetSort(bson.D{{"_id", 1}})
+					cursor, err := coll.Find(context.Background(), encryptedExpr, opts)
+					assert.Nil(mt, err, "error in coll.Find: %v", err)
+					defer cursor.Close(context.Background())
+
+					checkCursorResults(cursor, test.field, test.twoHundred)
+				})
+
+				mt.Run("Case 5: can run an aggregation expression inside $expr", func(mt *mtest.T) {
+					encryptedClient, clientEncryption := testSetup()
+					defer clientEncryption.Close(context.Background())
+					defer encryptedClient.Disconnect(context.Background())
+					eo := options.Encrypt().
+						SetAlgorithm("RangePreview").
+						SetKeyID(key1ID).
+						SetContentionFactor(0).
+						SetQueryType("rangePreview").
+						SetRangeOptions(test.rangeOpts)
+
+					expr := bson.M{
+						"$and": bson.A{
+							bson.M{
+								"$lt": bson.A{
+									fmt.Sprintf("$%v", test.field),
+									test.thirty,
+								},
+							},
+						},
+					}
+
+					// Encrypt.
+					var encryptedExpr bson.Raw
+					{
+						err := clientEncryption.EncryptExpression(context.Background(), expr, &encryptedExpr, eo)
+						assert.Nil(mt, err, "error in EncryptExpression: %v", err)
+					}
+
+					coll := encryptedClient.Database("db").Collection("explicit_encryption")
+					opts := options.Find().SetSort(bson.D{{"_id", 1}})
+					cursor, err := coll.Find(context.Background(), bson.M{"$expr": encryptedExpr}, opts)
+					assert.Nil(mt, err, "error in coll.Find: %v", err)
+					defer cursor.Close(context.Background())
+
+					checkCursorResults(cursor, test.field, test.zero, test.six)
+				})
+
+				if test.field != "encryptedDoubleNoPrecision" && test.field != "encryptedDecimalNoPrecision" {
+					mt.Run("Case 6: encrypting a document greater than the maximum errors", func(mt *mtest.T) {
+						encryptedClient, clientEncryption := testSetup()
+						defer clientEncryption.Close(context.Background())
+						defer encryptedClient.Disconnect(context.Background())
+						eo := options.Encrypt().
+							SetAlgorithm("RangePreview").
+							SetKeyID(key1ID).
+							SetContentionFactor(0).
+							SetRangeOptions(test.rangeOpts)
+
+						_, err := clientEncryption.Encrypt(context.Background(), test.twoHundredOne, eo)
+						assert.NotNil(mt, err, "expected error, but got none")
+					})
+
+					mt.Run("Case 7: encrypting a document of a different type errors", func(mt *mtest.T) {
+						encryptedClient, clientEncryption := testSetup()
+						defer clientEncryption.Close(context.Background())
+						defer encryptedClient.Disconnect(context.Background())
+						eo := options.Encrypt().
+							SetAlgorithm("RangePreview").
+							SetKeyID(key1ID).
+							SetContentionFactor(0).
+							SetRangeOptions(test.rangeOpts)
+
+						var val bson.RawValue
+						if test.field == "encryptedInt" {
+							val = bson.RawValue{Type: bson.TypeDouble, Value: bsoncore.AppendDouble(nil, 6)}
+						} else {
+							val = bson.RawValue{Type: bson.TypeInt32, Value: bsoncore.AppendInt32(nil, 6)}
+						}
+
+						_, err := clientEncryption.Encrypt(context.Background(), val, eo)
+						assert.NotNil(mt, err, "expected error, but got none")
+					})
+				}
+
+				if test.field != "encryptedDoubleNoPrecision" && test.field != "encryptedDoublePrecision" && test.field != "encryptedDecimalNoPrecision" && test.field != "encryptedDecimalPrecision" {
+					mt.Run("Case 8: setting precision errors if the type is not a double", func(mt *mtest.T) {
+						encryptedClient, clientEncryption := testSetup()
+						defer clientEncryption.Close(context.Background())
+						defer encryptedClient.Disconnect(context.Background())
+
+						// Copy rangeOpts and set precision.
+						ro := test.rangeOpts
+						ro.SetPrecision(2)
+						eo := options.Encrypt().
+							SetAlgorithm("RangePreview").
+							SetKeyID(key1ID).
+							SetContentionFactor(0).
+							SetRangeOptions(ro)
+
+						_, err := clientEncryption.Encrypt(context.Background(), test.six, eo)
+						assert.NotNil(mt, err, "expected error, but got none")
+					})
+				}
+			})
+		}
+	})
 }
 
 func getWatcher(mt *mtest.T, streamType mongo.StreamType, cpt *cseProseTest) watcher {
@@ -2261,4 +2994,21 @@ func listenForConnections(t *testing.T, run func(net.Conn)) net.Listener {
 		}
 	}()
 	return l
+}
+
+type localTransport struct {
+	rt http.RoundTripper
+
+	header http.Header
+}
+
+func (t *localTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.URL.Host = "localhost:8080"
+	for key, vals := range t.header {
+		for _, val := range vals {
+			r.Header.Add(key, val)
+		}
+	}
+	return t.rt.RoundTrip(r)
 }

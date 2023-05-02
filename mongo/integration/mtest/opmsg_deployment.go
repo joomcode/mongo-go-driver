@@ -51,13 +51,14 @@ type connection struct {
 
 var _ driver.Connection = &connection{}
 
-// WriteWireMessage is a no-op operation.
-func (c *connection) WriteWireMessage(_ context.Context, wm []byte) error {
+// WriteWireMessage is a no-op.
+func (c *connection) WriteWireMessage(context.Context, []byte) error {
 	return nil
 }
 
 // ReadWireMessage returns the next response in the connection's list of responses.
-func (c *connection) ReadWireMessage(_ context.Context, dst []byte) ([]byte, error) {
+func (c *connection) ReadWireMessage(_ context.Context) ([]byte, error) {
+	var dst []byte
 	if len(c.responses) == 0 {
 		return dst, errors.New("no responses remaining")
 	}

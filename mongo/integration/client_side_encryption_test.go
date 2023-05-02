@@ -17,8 +17,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/internal/testutil"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -243,14 +243,15 @@ func TestClientSideEncryptionWithExplicitSessions(t *testing.T) {
 // customCrypt is a test implementation of the driver.Crypt interface. It keeps track of the number of times its
 // methods have been called.
 type customCrypt struct {
-	numEncryptCalls              int
-	numDecryptCalls              int
-	numCreateDataKeyCalls        int
-	numEncryptExplicitCalls      int
-	numDecryptExplicitCalls      int
-	numCloseCalls                int
-	numBypassAutoEncryptionCalls int
-	numRewrapDataKeyCalls        int
+	numEncryptCalls                   int
+	numDecryptCalls                   int
+	numCreateDataKeyCalls             int
+	numEncryptExplicitCalls           int
+	numEncryptExplicitExpressionCalls int
+	numDecryptExplicitCalls           int
+	numCloseCalls                     int
+	numBypassAutoEncryptionCalls      int
+	numRewrapDataKeyCalls             int
 }
 
 var (
@@ -308,6 +309,12 @@ func (c *customCrypt) CreateDataKey(_ context.Context, _ string, _ *mcopts.DataK
 func (c *customCrypt) EncryptExplicit(_ context.Context, _ bsoncore.Value, _ *mcopts.ExplicitEncryptionOptions) (byte, []byte, error) {
 	c.numEncryptExplicitCalls++
 	return 0, nil, nil
+}
+
+// EncryptExplicit implements the driver.Crypt interface.
+func (c *customCrypt) EncryptExplicitExpression(_ context.Context, _ bsoncore.Document, _ *mcopts.ExplicitEncryptionOptions) (bsoncore.Document, error) {
+	c.numEncryptExplicitExpressionCalls++
+	return nil, nil
 }
 
 // DecryptExplicit implements the driver.Crypt interface.
@@ -385,6 +392,8 @@ func TestClientSideEncryptionCustomCrypt(t *testing.T) {
 			"expected 0 calls to CreateDataKey, got %v", cc.numCreateDataKeyCalls)
 		assert.Equal(mt, cc.numEncryptExplicitCalls, 0,
 			"expected 0 calls to EncryptExplicit, got %v", cc.numEncryptExplicitCalls)
+		assert.Equal(mt, cc.numEncryptExplicitExpressionCalls, 0,
+			"expected 0 calls to EncryptExplicitExpression, got %v", cc.numEncryptExplicitExpressionCalls)
 		assert.Equal(mt, cc.numDecryptExplicitCalls, 0,
 			"expected 0 calls to DecryptExplicit, got %v", cc.numDecryptExplicitCalls)
 		assert.Equal(mt, cc.numCloseCalls, 0,
@@ -397,7 +406,7 @@ func TestClientSideEncryptionCustomCrypt(t *testing.T) {
 func TestFLE2CreateCollection(t *testing.T) {
 	// FLE 2 (aka Queryable Encryption) is not supported on Standalone topology.
 	mtOpts := mtest.NewOptions().
-		MinServerVersion("6.0").
+		MinServerVersion("7.0").
 		Enterprise(true).
 		CreateClient(false).
 		Topologies(mtest.ReplicaSet,
@@ -409,9 +418,8 @@ func TestFLE2CreateCollection(t *testing.T) {
 
 	efJSON := `
 	{
-		"escCollection": "encryptedCollection.esc",
-		"eccCollection": "encryptedCollection.ecc",
-		"ecocCollection": "encryptedCollection.ecoc",
+		"escCollection": "enxcol_.encryptedCollection.esc",
+		"ecocCollection": "enxcol_.encryptedCollection.ecoc",
 		"fields": [
 		  {
 			"path": "firstName",
@@ -435,11 +443,9 @@ func TestFLE2CreateCollection(t *testing.T) {
 	mt.Run("CreateCollection from encryptedFields", func(mt *mtest.T) {
 		// Drop data and state collections to clean up from a prior test run.
 		{
-			err = mt.DB.Collection("encryptedCollection.esc").Drop(context.Background())
+			err = mt.DB.Collection("enxcol_.encryptedCollection.esc").Drop(context.Background())
 			assert.Nil(mt, err, "error in Drop: %v", err)
-			err = mt.DB.Collection("encryptedCollection.ecc").Drop(context.Background())
-			assert.Nil(mt, err, "error in Drop: %v", err)
-			err = mt.DB.Collection("encryptedCollection.ecoc").Drop(context.Background())
+			err = mt.DB.Collection("enxcol_.encryptedCollection.ecoc").Drop(context.Background())
 			assert.Nil(mt, err, "error in Drop: %v", err)
 			err := mt.DB.Collection("coll").Drop(context.Background())
 			assert.Nil(mt, err, "error in Drop: %v", err)
@@ -453,17 +459,13 @@ func TestFLE2CreateCollection(t *testing.T) {
 			assert.Nil(mt, err, "error in ListCollectionNames")
 			assert.Equal(mt, got, []string{"coll"}, "expected ['coll'], got: %v", got)
 
-			got, err = mt.DB.ListCollectionNames(context.Background(), bson.D{{"name", "encryptedCollection.esc"}})
+			got, err = mt.DB.ListCollectionNames(context.Background(), bson.D{{"name", "enxcol_.encryptedCollection.esc"}})
 			assert.Nil(mt, err, "error in ListCollectionNames")
-			assert.Equal(mt, got, []string{"encryptedCollection.esc"}, "expected ['encryptedCollection.esc'], got: %v", got)
+			assert.Equal(mt, got, []string{"enxcol_.encryptedCollection.esc"}, "expected ['encryptedCollection.esc'], got: %v", got)
 
-			got, err = mt.DB.ListCollectionNames(context.Background(), bson.D{{"name", "encryptedCollection.ecc"}})
+			got, err = mt.DB.ListCollectionNames(context.Background(), bson.D{{"name", "enxcol_.encryptedCollection.ecoc"}})
 			assert.Nil(mt, err, "error in ListCollectionNames")
-			assert.Equal(mt, got, []string{"encryptedCollection.ecc"}, "expected ['encryptedCollection.ecc'], got: %v", got)
-
-			got, err = mt.DB.ListCollectionNames(context.Background(), bson.D{{"name", "encryptedCollection.ecoc"}})
-			assert.Nil(mt, err, "error in ListCollectionNames")
-			assert.Equal(mt, got, []string{"encryptedCollection.ecoc"}, "expected ['encryptedCollection.ecoc'], got: %v", got)
+			assert.Equal(mt, got, []string{"enxcol_.encryptedCollection.ecoc"}, "expected ['encryptedCollection.ecoc'], got: %v", got)
 
 			indexSpecs, err := mt.DB.Collection("coll").Indexes().ListSpecifications(context.Background())
 			assert.Nil(mt, err, "error in Indexes().ListSpecifications: %v", err)
@@ -475,8 +477,10 @@ func TestFLE2CreateCollection(t *testing.T) {
 
 func TestFLE2DocsExample(t *testing.T) {
 	// FLE 2 is not supported on Standalone topology.
+	// Only test MongoDB Server 7.0+. MongoDB Server 7.0 introduced a backwards breaking change to the Queryable Encryption (QE) protocol: QEv2.
+	// libmongocrypt is configured to use the QEv2 protocol.
 	mtOpts := mtest.NewOptions().
-		MinServerVersion("6.0").
+		MinServerVersion("7.0").
 		Enterprise(true).
 		CreateClient(false).
 		Topologies(mtest.ReplicaSet,
@@ -485,6 +489,11 @@ func TestFLE2DocsExample(t *testing.T) {
 			mtest.ShardedReplicaSet)
 	mt := mtest.New(t, mtOpts)
 	defer mt.Close()
+
+	if mtest.Serverless() {
+		// Skip tests if running against serverless, as capped collections are banned.
+		mt.Skip("Queryable Encryption tests are skipped on serverless until QEv2 protocol is enabled on serverless by default: DRIVERS-2589")
+	}
 
 	mt.Run("Auto Encryption", func(mt *mtest.T) {
 		// Drop data from prior test runs.

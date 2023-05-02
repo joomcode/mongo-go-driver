@@ -19,7 +19,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"go.mongodb.org/mongo-driver/internal"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
@@ -243,7 +244,7 @@ func TestConnection(t *testing.T) {
 
 							connectErr = conn.connect(connectCtx)
 						}
-						assert.Soon(t, callback, tc.maxConnectTime)
+						helpers.AssertSoon(t, callback, tc.maxConnectTime)
 
 						ce, ok := connectErr.(ConnectionError)
 						assert.True(t, ok, "expected error %v to be of type %T", connectErr, ConnectionError{})
@@ -278,7 +279,7 @@ func TestConnection(t *testing.T) {
 
 							connectErr = conn.connect(connectCtx)
 						}
-						assert.Soon(t, callback, tc.maxConnectTime)
+						helpers.AssertSoon(t, callback, tc.maxConnectTime)
 
 						ce, ok := connectErr.(ConnectionError)
 						assert.True(t, ok, "expected error %v to be of type %T", connectErr, ConnectionError{})
@@ -475,7 +476,7 @@ func TestConnection(t *testing.T) {
 			t.Run("closed connection", func(t *testing.T) {
 				conn := &connection{id: "foobar"}
 				want := ConnectionError{ConnectionID: "foobar", message: "connection is closed"}
-				_, got := conn.readWireMessage(context.Background(), []byte{})
+				_, got := conn.readWireMessage(context.Background())
 				if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 					t.Errorf("errors do not match. got %v; want %v", got, want)
 				}
@@ -509,7 +510,7 @@ func TestConnection(t *testing.T) {
 						}
 						tnc := &testNetConn{deadlineerr: errors.New("set readDeadline error")}
 						conn := &connection{id: "foobar", nc: tnc, readTimeout: tc.timeout, state: connConnected}
-						_, got := conn.readWireMessage(ctx, []byte{})
+						_, got := conn.readWireMessage(ctx)
 						if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 							t.Errorf("errors do not match. got %v; want %v", got, want)
 						}
@@ -528,7 +529,7 @@ func TestConnection(t *testing.T) {
 					conn.cancellationListener = listener
 
 					want := ConnectionError{ConnectionID: "foobar", Wrapped: err, message: "incomplete read of message header"}
-					_, got := conn.readWireMessage(context.Background(), []byte{})
+					_, got := conn.readWireMessage(context.Background())
 					if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 						t.Errorf("errors do not match. got %v; want %v", got, want)
 					}
@@ -545,7 +546,7 @@ func TestConnection(t *testing.T) {
 					conn.cancellationListener = listener
 
 					want := ConnectionError{ConnectionID: "foobar", Wrapped: err, message: "incomplete read of full message"}
-					_, got := conn.readWireMessage(context.Background(), []byte{})
+					_, got := conn.readWireMessage(context.Background())
 					if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 						t.Errorf("errors do not match. got %v; want %v", got, want)
 					}
@@ -581,7 +582,7 @@ func TestConnection(t *testing.T) {
 							conn.cancellationListener = listener
 
 							want := ConnectionError{ConnectionID: "foobar", Wrapped: err, message: err.Error()}
-							_, got := conn.readWireMessage(context.Background(), nil)
+							_, got := conn.readWireMessage(context.Background())
 							if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 								t.Errorf("errors do not match. got %v; want %v", got, want)
 							}
@@ -597,7 +598,7 @@ func TestConnection(t *testing.T) {
 					listener := newTestCancellationListener(false)
 					conn.cancellationListener = listener
 
-					got, err := conn.readWireMessage(context.Background(), nil)
+					got, err := conn.readWireMessage(context.Background())
 					noerr(t, err)
 					if !cmp.Equal(got, want) {
 						t.Errorf("did not read full wire message. got %v; want %v", got, want)
@@ -634,7 +635,7 @@ func TestConnection(t *testing.T) {
 							wg.Add(1)
 							go func() {
 								defer wg.Done()
-								_, err = conn.readWireMessage(ctx, nil)
+								_, err = conn.readWireMessage(ctx)
 							}()
 
 							<-nc.operationStartedChan
@@ -656,7 +657,7 @@ func TestConnection(t *testing.T) {
 					conn.cancellationListener = listener
 
 					want := ConnectionError{ConnectionID: conn.id, Wrapped: context.Canceled, message: "unable to read server response"}
-					_, err := conn.readWireMessage(context.Background(), nil)
+					_, err := conn.readWireMessage(context.Background())
 					assert.Equal(t, want, err, "expected error %v, got %v", want, err)
 					assert.Equal(t, connDisconnected, conn.state, "expected connection state %v, got %v", connDisconnected,
 						conn.state)
@@ -717,7 +718,7 @@ func TestConnection(t *testing.T) {
 			if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 				t.Errorf("errors do not match. got %v; want %v", got, want)
 			}
-			_, got = conn.ReadWireMessage(context.Background(), nil)
+			_, got = conn.ReadWireMessage(context.Background())
 			if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 				t.Errorf("errors do not match. got %v; want %v", got, want)
 			}
@@ -761,6 +762,12 @@ func TestConnection(t *testing.T) {
 			got = conn.LocalAddress()
 			if !cmp.Equal(got, want) {
 				t.Errorf("LocalAddresses do not match. got %v; want %v", got, want)
+			}
+
+			want = (*int32)(nil)
+			got = conn.ServerConnectionID()
+			if !cmp.Equal(got, want) {
+				t.Errorf("ServerConnectionIDs do not match. got %v; want %v", got, want)
 			}
 		})
 
@@ -1139,7 +1146,7 @@ func (wfc *writeFailConn) Write([]byte) (int, error) {
 	return 0, errors.New("Write error")
 }
 
-func (wfc *writeFailConn) SetWriteDeadline(t time.Time) error {
+func (wfc *writeFailConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
