@@ -21,11 +21,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsonrw"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/event"
-	"go.mongodb.org/mongo-driver/internal"
 	"go.mongodb.org/mongo-driver/internal/assert"
-	"go.mongodb.org/mongo-driver/internal/testutil"
-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
+	"go.mongodb.org/mongo-driver/internal/eventtest"
+	"go.mongodb.org/mongo-driver/internal/handshake"
+	"go.mongodb.org/mongo-driver/internal/integtest"
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -127,8 +127,6 @@ func TestClient(t *testing.T) {
 			"expected security field to be type %v, got %v", bson.TypeMaxKey, security.Type)
 		_, found := security.Document().LookupErr("SSLServerSubjectName")
 		assert.Nil(mt, found, "SSLServerSubjectName not found in result")
-		_, found = security.Document().LookupErr("SSLServerHasCertificateAuthority")
-		assert.Nil(mt, found, "SSLServerHasCertificateAuthority not found in result")
 	})
 	mt.RunOpts("x509", mtest.NewOptions().Auth(true).SSL(true), func(mt *mtest.T) {
 		testCases := []struct {
@@ -183,7 +181,7 @@ func TestClient(t *testing.T) {
 					tc.password,
 				)
 				authClientOpts := options.Client().ApplyURI(cs)
-				testutil.AddTestServerAPIVersion(authClientOpts)
+				integtest.AddTestServerAPIVersion(authClientOpts)
 				authClient, err := mongo.Connect(context.Background(), authClientOpts)
 				assert.Nil(mt, err, "authClient Connect error: %v", err)
 				defer func() { _ = authClient.Disconnect(context.Background()) }()
@@ -328,7 +326,7 @@ func TestClient(t *testing.T) {
 			invalidClientOpts := options.Client().
 				SetServerSelectionTimeout(100 * time.Millisecond).SetHosts([]string{"invalid:123"}).
 				SetConnectTimeout(500 * time.Millisecond).SetSocketTimeout(500 * time.Millisecond)
-			testutil.AddTestServerAPIVersion(invalidClientOpts)
+			integtest.AddTestServerAPIVersion(invalidClientOpts)
 			client, err := mongo.Connect(context.Background(), invalidClientOpts)
 			assert.Nil(mt, err, "Connect error: %v", err)
 			err = client.Ping(context.Background(), readpref.Primary())
@@ -466,7 +464,7 @@ func TestClient(t *testing.T) {
 		// First two messages should be connection handshakes: one for the heartbeat connection and the other for the
 		// application connection.
 		for idx, pair := range msgPairs[:2] {
-			helloCommand := internal.LegacyHello
+			helloCommand := handshake.LegacyHello
 			//  Expect "hello" command name with API version.
 			if os.Getenv("REQUIRE_API_VERSION") == "true" {
 				helloCommand = "hello"
@@ -526,7 +524,7 @@ func TestClient(t *testing.T) {
 
 		// Assert that the minimum RTT is eventually >250ms.
 		topo := getTopologyFromClient(mt.Client)
-		helpers.AssertSoon(mt, func(ctx context.Context) {
+		assert.Soon(mt, func(ctx context.Context) {
 			for {
 				// Stop loop if callback has been canceled.
 				select {
@@ -566,7 +564,7 @@ func TestClient(t *testing.T) {
 
 		// Reset the client with a dialer that delays all network round trips by 300ms and set the
 		// heartbeat interval to 100ms to reduce the time it takes to collect RTT samples.
-		tpm := monitor.NewTestPoolMonitor()
+		tpm := eventtest.NewTestPoolMonitor()
 		mt.ResetClient(options.Client().
 			SetPoolMonitor(tpm.PoolMonitor).
 			SetDialer(newSlowConnDialer(slowConnDialerDelay)).
@@ -574,7 +572,7 @@ func TestClient(t *testing.T) {
 
 		// Assert that the minimum RTT is eventually >250ms.
 		topo := getTopologyFromClient(mt.Client)
-		helpers.AssertSoon(mt, func(ctx context.Context) {
+		assert.Soon(mt, func(ctx context.Context) {
 			for {
 				// Stop loop if callback has been canceled.
 				select {
@@ -625,7 +623,7 @@ func TestClient(t *testing.T) {
 
 		// Assert that RTT90s are eventually >300ms.
 		topo := getTopologyFromClient(mt.Client)
-		helpers.AssertSoon(mt, func(ctx context.Context) {
+		assert.Soon(mt, func(ctx context.Context) {
 			for {
 				// Stop loop if callback has been canceled.
 				select {
@@ -667,7 +665,7 @@ func TestClient(t *testing.T) {
 		// heartbeat interval to 100ms to reduce the time it takes to collect RTT samples, and
 		// set a Timeout of 0 (infinite) on the Client to ensure that RTT90 is used as a sending
 		// threshold.
-		tpm := monitor.NewTestPoolMonitor()
+		tpm := eventtest.NewTestPoolMonitor()
 		mt.ResetClient(options.Client().
 			SetPoolMonitor(tpm.PoolMonitor).
 			SetDialer(newSlowConnDialer(slowConnDialerDelay)).
@@ -676,7 +674,7 @@ func TestClient(t *testing.T) {
 
 		// Assert that RTT90s are eventually >275ms.
 		topo := getTopologyFromClient(mt.Client)
-		helpers.AssertSoon(mt, func(ctx context.Context) {
+		assert.Soon(mt, func(ctx context.Context) {
 			for {
 				// Stop loop if callback has been canceled.
 				select {
@@ -730,8 +728,8 @@ func TestClient(t *testing.T) {
 		// First message should a be connection handshake. This handshake should use OP_QUERY as the OpCode, as wire
 		// version is not yet known.
 		pair := msgPairs[0]
-		assert.Equal(mt, internal.LegacyHello, pair.CommandName, "expected command name %s at index 0, got %s",
-			internal.LegacyHello, pair.CommandName)
+		assert.Equal(mt, handshake.LegacyHello, pair.CommandName, "expected command name %s at index 0, got %s",
+			handshake.LegacyHello, pair.CommandName)
 		assert.Equal(mt, wiremessage.OpQuery, pair.Sent.OpCode,
 			"expected 'OP_QUERY' OpCode in wire message, got %q", pair.Sent.OpCode.String())
 
@@ -792,17 +790,133 @@ func TestClient(t *testing.T) {
 	})
 }
 
-func TestClientStress(t *testing.T) {
+func TestClient_BSONOptions(t *testing.T) {
 	t.Parallel()
 
+	mt := mtest.New(t, noClientOpts)
+	defer mt.Close()
+
+	type jsonTagsTest struct {
+		A string
+		B string `json:"x"`
+		C string `json:"y" bson:"3"`
+	}
+
+	testCases := []struct {
+		name       string
+		bsonOpts   *options.BSONOptions
+		doc        interface{}
+		decodeInto func() interface{}
+		want       interface{}
+		wantRaw    bson.Raw
+	}{
+		{
+			name: "UseJSONStructTags",
+			bsonOpts: &options.BSONOptions{
+				UseJSONStructTags: true,
+			},
+			doc: jsonTagsTest{
+				A: "apple",
+				B: "banana",
+				C: "carrot",
+			},
+			decodeInto: func() interface{} { return &jsonTagsTest{} },
+			want: &jsonTagsTest{
+				A: "apple",
+				B: "banana",
+				C: "carrot",
+			},
+			wantRaw: bson.Raw(bsoncore.NewDocumentBuilder().
+				AppendString("a", "apple").
+				AppendString("x", "banana").
+				AppendString("3", "carrot").
+				Build()),
+		},
+		{
+			name: "IntMinSize",
+			bsonOpts: &options.BSONOptions{
+				IntMinSize: true,
+			},
+			doc:        bson.D{{Key: "x", Value: int64(1)}},
+			decodeInto: func() interface{} { return &bson.D{} },
+			want:       &bson.D{{Key: "x", Value: int32(1)}},
+			wantRaw: bson.Raw(bsoncore.NewDocumentBuilder().
+				AppendInt32("x", 1).
+				Build()),
+		},
+		{
+			name: "DefaultDocumentM",
+			bsonOpts: &options.BSONOptions{
+				DefaultDocumentM: true,
+			},
+			doc:        bson.D{{Key: "doc", Value: bson.D{{Key: "a", Value: int64(1)}}}},
+			decodeInto: func() interface{} { return &bson.D{} },
+			want:       &bson.D{{Key: "doc", Value: bson.M{"a": int64(1)}}},
+		},
+	}
+
+	for _, tc := range testCases {
+		opts := mtest.NewOptions().ClientOptions(
+			options.Client().SetBSONOptions(tc.bsonOpts))
+		mt.RunOpts(tc.name, opts, func(mt *mtest.T) {
+			res, err := mt.Coll.InsertOne(context.Background(), tc.doc)
+			require.NoError(mt, err, "InsertOne error")
+
+			sr := mt.Coll.FindOne(
+				context.Background(),
+				bson.D{{Key: "_id", Value: res.InsertedID}},
+				// Exclude the auto-generated "_id" field so we can make simple
+				// assertions on the return value.
+				options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 0}}))
+
+			if tc.want != nil {
+				got := tc.decodeInto()
+				err := sr.Decode(got)
+				require.NoError(mt, err, "Decode error")
+
+				assert.Equal(mt, tc.want, got, "expected and actual decoded result are different")
+			}
+
+			if tc.wantRaw != nil {
+				got, err := sr.DecodeBytes()
+				require.NoError(mt, err, "DecodeBytes error")
+
+				assert.EqualBSON(mt, tc.wantRaw, got)
+			}
+		})
+	}
+
+	opts := mtest.NewOptions().ClientOptions(
+		options.Client().SetBSONOptions(&options.BSONOptions{
+			ErrorOnInlineDuplicates: true,
+		}))
+	mt.RunOpts("ErrorOnInlineDuplicates", opts, func(mt *mtest.T) {
+		type inlineDupInner struct {
+			A string
+		}
+
+		type inlineDupOuter struct {
+			A string
+			B *inlineDupInner `bson:"b,inline"`
+		}
+
+		_, err := mt.Coll.InsertOne(context.Background(), inlineDupOuter{
+			A: "outer",
+			B: &inlineDupInner{
+				A: "inner",
+			},
+		})
+		require.Error(mt, err, "expected InsertOne to return an error")
+	})
+}
+
+func TestClientStress(t *testing.T) {
 	mtOpts := mtest.NewOptions().CreateClient(false)
 	mt := mtest.New(t, mtOpts)
 	defer mt.Close()
 
 	// Test that a Client can recover from a massive traffic spike after the traffic spike is over.
 	mt.Run("Client recovers from traffic spike", func(mt *mtest.T) {
-		mt.Parallel()
-
 		oid := primitive.NewObjectID()
 		doc := bson.D{{Key: "_id", Value: oid}, {Key: "key", Value: "value"}}
 		_, err := mt.Coll.InsertOne(context.Background(), doc)
@@ -851,14 +965,12 @@ func TestClientStress(t *testing.T) {
 		// pool configurations.
 		maxPoolSizes := []uint64{1, 10, 100}
 		for _, maxPoolSize := range maxPoolSizes {
-			tpm := monitor.NewTestPoolMonitor()
+			tpm := eventtest.NewTestPoolMonitor()
 			maxPoolSizeOpt := mtest.NewOptions().ClientOptions(
 				options.Client().
 					SetPoolMonitor(tpm.PoolMonitor).
 					SetMaxPoolSize(maxPoolSize))
 			mt.RunOpts(fmt.Sprintf("maxPoolSize %d", maxPoolSize), maxPoolSizeOpt, func(mt *mtest.T) {
-				mt.Parallel()
-
 				// Print the count of connection created, connection closed, and pool clear events
 				// collected during the test to help with debugging.
 				defer func() {

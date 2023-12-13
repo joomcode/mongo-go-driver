@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +27,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/event"
-	"go.mongodb.org/mongo-driver/internal"
 	"go.mongodb.org/mongo-driver/internal/assert"
-	"go.mongodb.org/mongo-driver/internal/testutil"
+	"go.mongodb.org/mongo-driver/internal/handshake"
+	"go.mongodb.org/mongo-driver/internal/integtest"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -55,6 +54,16 @@ const (
 	maxBsonObjSize                = 16777216            // max bytes in BSON object
 )
 
+func containsSubstring(possibleSubstrings []string, str string) bool {
+	for _, possibleSubstring := range possibleSubstrings {
+		if strings.Contains(str, possibleSubstring) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func TestClientSideEncryptionProse(t *testing.T) {
 	t.Parallel()
 
@@ -63,7 +72,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 	defer mt.Close()
 
 	defaultKvClientOptions := options.Client().ApplyURI(mtest.ClusterURI())
-	testutil.AddTestServerAPIVersion(defaultKvClientOptions)
+	integtest.AddTestServerAPIVersion(defaultKvClientOptions)
 	fullKmsProvidersMap := map[string]map[string]interface{}{
 		"aws": {
 			"accessKeyId":     awsAccessKeyID,
@@ -245,7 +254,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 					},
 				}
 				kvClientOpts := options.Client().ApplyURI(mtest.ClusterURI()).SetMonitor(monitor)
-				testutil.AddTestServerAPIVersion(kvClientOpts)
+				integtest.AddTestServerAPIVersion(kvClientOpts)
 				cpt := setup(mt, aeo, kvClientOpts, ceo)
 				defer cpt.teardown(mt)
 
@@ -344,7 +353,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 						Username: "fake-user",
 						Password: "fake-password",
 					})
-					testutil.AddTestServerAPIVersion(externalKvOpts)
+					integtest.AddTestServerAPIVersion(externalKvOpts)
 					aeo.SetKeyVaultClientOptions(externalKvOpts)
 					kvClientOpts = externalKvOpts
 				}
@@ -866,26 +875,119 @@ func TestClientSideEncryptionProse(t *testing.T) {
 			"endpoint": "doesnotexist.local:5698",
 		}
 
+		const (
+			errConnectionRefused           = "connection refused"
+			errInvalidKMSResponse          = "Invalid KMS response"
+			errMongocryptError             = "mongocrypt error"
+			errNoSuchHost                  = "no such host"
+			errServerMisbehaving           = "server misbehaving"
+			errWindowsTLSConnectionRefused = "No connection could be made because the target machine actively refused it"
+		)
+
 		testCases := []struct {
 			name                                  string
 			provider                              string
 			masterKey                             interface{}
-			errorSubstring                        string
+			errorSubstring                        []string
 			testInvalidClientEncryption           bool
-			invalidClientEncryptionErrorSubstring string
+			invalidClientEncryptionErrorSubstring []string
 		}{
-			{"Case 1: aws success without endpoint", "aws", awsSuccessWithoutEndpoint, "", false, ""},
-			{"Case 2: aws success with endpoint", "aws", awsSuccessWithEndpoint, "", false, ""},
-			{"Case 3: aws success with https endpoint", "aws", awsSuccessWithHTTPSEndpoint, "", false, ""},
-			{"Case 4: aws failure with connection error", "aws", awsFailureConnectionError, "connection refused", false, ""},
-			{"Case 5: aws failure with wrong endpoint", "aws", awsFailureInvalidEndpoint, "mongocrypt error", false, ""},
-			{"Case 6: aws failure with parse error", "aws", awsFailureParseError, "no such host", false, ""},
-			{"Case 7: azure success", "azure", azure, "", true, "no such host"},
-			{"Case 8: gcp success", "gcp", gcpSuccess, "", true, "no such host"},
-			{"Case 9: gcp failure", "gcp", gcpFailure, "Invalid KMS response", false, ""},
-			{"Case 10: kmip success without endpoint", "kmip", kmipSuccessWithoutEndpoint, "", true, "no such host"},
-			{"Case 11: kmip success with endpoint", "kmip", kmipSuccessWithEndpoint, "", false, ""},
-			{"Case 12: kmip failure with invalid endpoint", "kmip", kmipFailureInvalidEndpoint, "no such host", false, ""},
+			{
+				name:                                  "Case 1: aws success without endpoint",
+				provider:                              "aws",
+				masterKey:                             awsSuccessWithoutEndpoint,
+				errorSubstring:                        []string{},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 2: aws success with endpoint",
+				provider:                              "aws",
+				masterKey:                             awsSuccessWithEndpoint,
+				errorSubstring:                        []string{},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 3: aws success with https endpoint",
+				provider:                              "aws",
+				masterKey:                             awsSuccessWithHTTPSEndpoint,
+				errorSubstring:                        []string{},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 4: aws failure with connection error",
+				provider:                              "aws",
+				masterKey:                             awsFailureConnectionError,
+				errorSubstring:                        []string{errConnectionRefused, errWindowsTLSConnectionRefused},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 5: aws failure with wrong endpoint",
+				provider:                              "aws",
+				masterKey:                             awsFailureInvalidEndpoint,
+				errorSubstring:                        []string{errMongocryptError},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 6: aws failure with parse error",
+				provider:                              "aws",
+				masterKey:                             awsFailureParseError,
+				errorSubstring:                        []string{errNoSuchHost, errServerMisbehaving},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 7: azure success",
+				provider:                              "azure",
+				masterKey:                             azure,
+				errorSubstring:                        []string{},
+				testInvalidClientEncryption:           true,
+				invalidClientEncryptionErrorSubstring: []string{errNoSuchHost, errServerMisbehaving},
+			},
+			{
+				name:                                  "Case 8: gcp success",
+				provider:                              "gcp",
+				masterKey:                             gcpSuccess,
+				errorSubstring:                        []string{},
+				testInvalidClientEncryption:           true,
+				invalidClientEncryptionErrorSubstring: []string{errNoSuchHost, errServerMisbehaving},
+			},
+			{
+				name:                                  "Case 9: gcp failure",
+				provider:                              "gcp",
+				masterKey:                             gcpFailure,
+				errorSubstring:                        []string{errInvalidKMSResponse},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 10: kmip success without endpoint",
+				provider:                              "kmip",
+				masterKey:                             kmipSuccessWithoutEndpoint,
+				errorSubstring:                        []string{},
+				testInvalidClientEncryption:           true,
+				invalidClientEncryptionErrorSubstring: []string{errNoSuchHost, errServerMisbehaving},
+			},
+			{
+				name:                                  "Case 11: kmip success with endpoint",
+				provider:                              "kmip",
+				masterKey:                             kmipSuccessWithEndpoint,
+				errorSubstring:                        []string{},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
+			{
+				name:                                  "Case 12: kmip failure with invalid endpoint",
+				provider:                              "kmip",
+				masterKey:                             kmipFailureInvalidEndpoint,
+				errorSubstring:                        []string{errNoSuchHost, errServerMisbehaving},
+				testInvalidClientEncryption:           false,
+				invalidClientEncryptionErrorSubstring: []string{},
+			},
 		}
 		for _, tc := range testCases {
 			mt.Run(tc.name, func(mt *mtest.T) {
@@ -897,16 +999,12 @@ func TestClientSideEncryptionProse(t *testing.T) {
 
 				dkOpts := options.DataKey().SetMasterKey(tc.masterKey)
 				createdKey, err := cpt.clientEnc.CreateDataKey(context.Background(), tc.provider, dkOpts)
-				if tc.errorSubstring != "" {
+				if len(tc.errorSubstring) > 0 {
 					assert.NotNil(mt, err, "expected error, got nil")
-					errSubstr := tc.errorSubstring
-					if runtime.GOOS == "windows" && errSubstr == "connection refused" {
-						// tls.Dial returns an error that does not contain the substring "connection refused"
-						// on Windows machines
-						errSubstr = "No connection could be made because the target machine actively refused it"
-					}
-					assert.True(mt, strings.Contains(err.Error(), errSubstr),
-						"expected error '%s' to contain '%s'", err.Error(), errSubstr)
+
+					assert.True(t, containsSubstring(tc.errorSubstring, err.Error()),
+						"expected tc.errorSubstring=%v to contain %v, but it didn't", tc.errorSubstring, err.Error())
+
 					return
 				}
 				assert.Nil(mt, err, "CreateDataKey error: %v", err)
@@ -933,8 +1031,10 @@ func TestClientSideEncryptionProse(t *testing.T) {
 				invalidKeyOpts := options.DataKey().SetMasterKey(tc.masterKey)
 				_, err = invalidClientEncryption.CreateDataKey(context.Background(), tc.provider, invalidKeyOpts)
 				assert.NotNil(mt, err, "expected CreateDataKey error, got nil")
-				assert.True(mt, strings.Contains(err.Error(), tc.invalidClientEncryptionErrorSubstring),
-					"expected error %v to contain substring '%v'", err, tc.invalidClientEncryptionErrorSubstring)
+
+				assert.True(t, containsSubstring(tc.invalidClientEncryptionErrorSubstring, err.Error()),
+					"expected tc.invalidClientEncryptionErrorSubstring=%v to contain %v, but it didn't",
+					tc.invalidClientEncryptionErrorSubstring, err.Error())
 			})
 		}
 	})
@@ -1052,11 +1152,11 @@ func TestClientSideEncryptionProse(t *testing.T) {
 
 				mcryptOpts := options.Client().ApplyURI("mongodb://localhost:27021").
 					SetServerSelectionTimeout(1 * time.Second)
-				testutil.AddTestServerAPIVersion(mcryptOpts)
+				integtest.AddTestServerAPIVersion(mcryptOpts)
 				mcryptClient, err := mongo.Connect(context.Background(), mcryptOpts)
 				assert.Nil(mt, err, "mongocryptd Connect error: %v", err)
 
-				err = mcryptClient.Database("admin").RunCommand(context.Background(), bson.D{{internal.LegacyHelloLowercase, 1}}).Err()
+				err = mcryptClient.Database("admin").RunCommand(context.Background(), bson.D{{handshake.LegacyHelloLowercase, 1}}).Err()
 				assert.NotNil(mt, err, "expected mongocryptd legacy hello error, got nil")
 				assert.True(mt, strings.Contains(err.Error(), "server selection error"),
 					"expected mongocryptd server selection error, got %v", err)
@@ -1245,7 +1345,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 				}
 
 				if tc.keyVaultClientSet {
-					testutil.AddTestServerAPIVersion(d.clientKeyVaultOpts)
+					integtest.AddTestServerAPIVersion(d.clientKeyVaultOpts)
 					aeOpts.SetKeyVaultClientOptions(d.clientKeyVaultOpts)
 				}
 
@@ -1263,7 +1363,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 					SetMaxPoolSize(tc.maxPoolSize).
 					SetAutoEncryptionOptions(aeOpts)
 
-				testutil.AddTestServerAPIVersion(ceOpts)
+				integtest.AddTestServerAPIVersion(ceOpts)
 				clientEncrypted, err := mongo.Connect(context.Background(), ceOpts)
 				assert.Nil(mt, err, "Connect error: %v", err)
 				defer clientEncrypted.Disconnect(context.Background())
@@ -1566,10 +1666,6 @@ func TestClientSideEncryptionProse(t *testing.T) {
 	// Only test MongoDB Server 7.0+. MongoDB Server 7.0 introduced a backwards breaking change to the Queryable Encryption (QE) protocol: QEv2.
 	// libmongocrypt is configured to use the QEv2 protocol.
 	mt.RunOpts("12. explicit encryption", runOpts, func(mt *mtest.T) {
-		if mtest.Serverless() {
-			// Skip tests if running against serverless, as capped collections are banned.
-			mt.Skip("Queryable Encryption tests are skipped on serverless until QEv2 protocol is enabled on serverless by default: DRIVERS-2589")
-		}
 		// Test Setup ... begin
 		encryptedFields := readJSONFile(mt, "encrypted-fields.json")
 		key1Document := readJSONFile(mt, "key1-document.json")
@@ -1941,7 +2037,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 								co := options.Client().ApplyURI(mtest.ClusterURI())
 								keyVaultClient, err = mongo.Connect(context.Background(), co)
 								defer keyVaultClient.Disconnect(context.Background())
-								testutil.AddTestServerAPIVersion(co)
+								integtest.AddTestServerAPIVersion(co)
 								assert.Nil(mt, err, "error on Connect: %v", err)
 							}
 							ceOpts := options.ClientEncryption().
@@ -1983,7 +2079,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 								co := options.Client().ApplyURI(mtest.ClusterURI())
 								keyVaultClient, err = mongo.Connect(context.Background(), co)
 								defer keyVaultClient.Disconnect(context.Background())
-								testutil.AddTestServerAPIVersion(co)
+								integtest.AddTestServerAPIVersion(co)
 								assert.Nil(mt, err, "error on Connect: %v", err)
 							}
 							ceOpts := options.ClientEncryption().
@@ -2022,6 +2118,30 @@ func TestClientSideEncryptionProse(t *testing.T) {
 					})
 				}
 			}
+		})
+
+		mt.Run("Case 2: RewrapManyDataKeyOpts.provider is not optional", func(mt *mtest.T) {
+			var err error
+			var clientEncryption *mongo.ClientEncryption
+			{
+				var keyVaultClient *mongo.Client
+				{
+					co := options.Client().ApplyURI(mtest.ClusterURI())
+					keyVaultClient, err = mongo.Connect(context.Background(), co)
+					defer keyVaultClient.Disconnect(context.Background())
+					integtest.AddTestServerAPIVersion(co)
+					assert.Nil(mt, err, "error on Connect: %v", err)
+				}
+				ceOpts := options.ClientEncryption().
+					SetKeyVaultNamespace("keyvault.datakeys").
+					SetKmsProviders(fullKmsProvidersMap)
+				clientEncryption, err = mongo.NewClientEncryption(keyVaultClient, ceOpts)
+				assert.Nil(mt, err, "error in NewClientEncryption: %v", err)
+				defer clientEncryption.Close(context.Background())
+			}
+
+			_, err = clientEncryption.RewrapManyDataKey(context.Background(), bson.D{}, options.RewrapManyDataKey().SetMasterKey(bson.D{}))
+			assert.ErrorContains(mt, err, "expected 'Provider' to be set to identify type of 'MasterKey'")
 		})
 	})
 
@@ -2149,7 +2269,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
 			aeo := options.AutoEncryption().SetKmsProviders(kmsProviders).
 				SetExtraOptions(mongocryptdSpawnArgs)
 			cliOpts := options.Client().ApplyURI(mtest.ClusterURI()).SetAutoEncryptionOptions(aeo)
-			testutil.AddTestServerAPIVersion(cliOpts)
+			integtest.AddTestServerAPIVersion(cliOpts)
 			encClient, err := mongo.Connect(context.Background(), cliOpts)
 			assert.Nil(mt, err, "Connect error: %v", err)
 			defer func() {
@@ -2168,10 +2288,6 @@ func TestClientSideEncryptionProse(t *testing.T) {
 	// Only test MongoDB Server 7.0+. MongoDB Server 7.0 introduced a backwards breaking change to the Queryable Encryption (QE) protocol: QEv2.
 	// libmongocrypt is configured to use the QEv2 protocol.
 	mt.RunOpts("21. automatic data encryption keys", qeRunOpts, func(mt *mtest.T) {
-		if mtest.Serverless() {
-			// Skip tests if running against serverless, as capped collections are banned.
-			mt.Skip("Queryable Encryption tests are skipped on serverless until QEv2 protocol is enabled on serverless by default: DRIVERS-2589")
-		}
 		setup := func() (*mongo.Client, *mongo.ClientEncryption, error) {
 			opts := options.Client().ApplyURI(mtest.ClusterURI())
 			client, err := mongo.Connect(context.Background(), opts)
@@ -2333,10 +2449,6 @@ func TestClientSideEncryptionProse(t *testing.T) {
 	// Only test MongoDB Server 7.0+. MongoDB Server 7.0 introduced a backwards breaking change to the Queryable Encryption (QE) protocol: QEv2.
 	// libmongocrypt is configured to use the QEv2 protocol.
 	mt.RunOpts("22. range explicit encryption", qeRunOpts, func(mt *mtest.T) {
-		if mtest.Serverless() {
-			// Skip tests if running against serverless, as capped collections are banned.
-			mt.Skip("Queryable Encryption tests are skipped on serverless until QEv2 protocol is enabled on serverless by default: DRIVERS-2589")
-		}
 		type testcase struct {
 			typeStr       string
 			field         string
@@ -2842,7 +2954,7 @@ func setup(mt *mtest.T, aeo *options.AutoEncryptionOptions, kvClientOpts *option
 		}
 		opts := options.Client().ApplyURI(mtest.ClusterURI()).SetWriteConcern(mtest.MajorityWc).
 			SetReadPreference(mtest.PrimaryRp).SetAutoEncryptionOptions(aeo).SetMonitor(cseMonitor)
-		testutil.AddTestServerAPIVersion(opts)
+		integtest.AddTestServerAPIVersion(opts)
 		cpt.cseClient, err = mongo.Connect(context.Background(), opts)
 		assert.Nil(mt, err, "Connect error for encrypted client: %v", err)
 		cpt.cseColl = cpt.cseClient.Database("db").Collection("coll")
@@ -2915,7 +3027,7 @@ func newDeadlockTest(mt *mtest.T) *deadlockTest {
 	var err error
 
 	clientTestOpts := options.Client().ApplyURI(mtest.ClusterURI()).SetWriteConcern(mtest.MajorityWc)
-	testutil.AddTestServerAPIVersion(clientTestOpts)
+	integtest.AddTestServerAPIVersion(clientTestOpts)
 	if d.clientTest, err = mongo.Connect(context.Background(), clientTestOpts); err != nil {
 		mt.Fatalf("Connect error: %v", err)
 	}

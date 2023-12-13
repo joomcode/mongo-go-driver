@@ -9,10 +9,11 @@ package unified
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
+	"go.mongodb.org/mongo-driver/internal/bsonutil"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -42,7 +43,7 @@ func executeCreateView(ctx context.Context, operation *operation) (*operationRes
 		case "collection":
 			collName = val.StringValue()
 		case "pipeline":
-			pipeline = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
+			pipeline = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
 		case "viewOn":
 			viewOn = val.StringValue()
 		default:
@@ -108,6 +109,10 @@ func executeCreateCollection(ctx context.Context, operation *operation) (*operat
 					tso.SetMetaField(val.StringValue())
 				case "granularity":
 					tso.SetGranularity(val.StringValue())
+				case "bucketMaxSpanSeconds":
+					tso.SetBucketMaxSpan(time.Duration(val.Int32()) * time.Second)
+				case "bucketRoundingSeconds":
+					tso.SetBucketRounding(time.Duration(val.Int32()) * time.Second)
 				default:
 					return nil, fmt.Errorf("unrecognized timeseries option %q", key)
 				}

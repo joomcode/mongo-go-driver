@@ -16,12 +16,18 @@ import (
 )
 
 // ErrNilType is returned when nil is passed to either LookupEncoder or LookupDecoder.
+//
+// Deprecated: ErrNilType will not be supported in Go Driver 2.0.
 var ErrNilType = errors.New("cannot perform a decoder lookup on <nil>")
 
 // ErrNotPointer is returned when a non-pointer type is provided to LookupDecoder.
+//
+// Deprecated: ErrNotPointer will not be supported in Go Driver 2.0.
 var ErrNotPointer = errors.New("non-pointer provided to LookupDecoder")
 
 // ErrNoEncoder is returned when there wasn't an encoder available for a type.
+//
+// Deprecated: ErrNoEncoder will not be supported in Go Driver 2.0.
 type ErrNoEncoder struct {
 	Type reflect.Type
 }
@@ -34,6 +40,8 @@ func (ene ErrNoEncoder) Error() string {
 }
 
 // ErrNoDecoder is returned when there wasn't a decoder available for a type.
+//
+// Deprecated: ErrNoDecoder will not be supported in Go Driver 2.0.
 type ErrNoDecoder struct {
 	Type reflect.Type
 }
@@ -43,6 +51,8 @@ func (end ErrNoDecoder) Error() string {
 }
 
 // ErrNoTypeMapEntry is returned when there wasn't a type available for the provided BSON type.
+//
+// Deprecated: ErrNoTypeMapEntry will not be supported in Go Driver 2.0.
 type ErrNoTypeMapEntry struct {
 	Type bsontype.Type
 }
@@ -52,6 +62,8 @@ func (entme ErrNoTypeMapEntry) Error() string {
 }
 
 // ErrNotInterface is returned when the provided type is not an interface.
+//
+// Deprecated: ErrNotInterface will not be supported in Go Driver 2.0.
 var ErrNotInterface = errors.New("The provided type is not an interface")
 
 // A RegistryBuilder is used to build a Registry. This type is not goroutine
@@ -204,72 +216,42 @@ func (rb *RegistryBuilder) RegisterTypeMapEntry(bt bsontype.Type, rt reflect.Typ
 //
 // Deprecated: Use NewRegistry instead.
 func (rb *RegistryBuilder) Build() *Registry {
-	registry := new(Registry)
-
-	registry.typeEncoders = make(map[reflect.Type]ValueEncoder, len(rb.registry.typeEncoders))
-	for t, enc := range rb.registry.typeEncoders {
-		registry.typeEncoders[t] = enc
+	r := &Registry{
+		interfaceEncoders: append([]interfaceValueEncoder(nil), rb.registry.interfaceEncoders...),
+		interfaceDecoders: append([]interfaceValueDecoder(nil), rb.registry.interfaceDecoders...),
+		typeEncoders:      rb.registry.typeEncoders.Clone(),
+		typeDecoders:      rb.registry.typeDecoders.Clone(),
+		kindEncoders:      rb.registry.kindEncoders.Clone(),
+		kindDecoders:      rb.registry.kindDecoders.Clone(),
 	}
-
-	registry.typeDecoders = make(map[reflect.Type]ValueDecoder, len(rb.registry.typeDecoders))
-	for t, dec := range rb.registry.typeDecoders {
-		registry.typeDecoders[t] = dec
-	}
-
-	registry.interfaceEncoders = make([]interfaceValueEncoder, len(rb.registry.interfaceEncoders))
-	copy(registry.interfaceEncoders, rb.registry.interfaceEncoders)
-
-	registry.interfaceDecoders = make([]interfaceValueDecoder, len(rb.registry.interfaceDecoders))
-	copy(registry.interfaceDecoders, rb.registry.interfaceDecoders)
-
-	registry.kindEncoders = make(map[reflect.Kind]ValueEncoder)
-	for kind, enc := range rb.registry.kindEncoders {
-		registry.kindEncoders[kind] = enc
-	}
-
-	registry.kindDecoders = make(map[reflect.Kind]ValueDecoder)
-	for kind, dec := range rb.registry.kindDecoders {
-		registry.kindDecoders[kind] = dec
-	}
-
-	registry.typeMap = make(map[bsontype.Type]reflect.Type)
-	for bt, rt := range rb.registry.typeMap {
-		registry.typeMap[bt] = rt
-	}
-
-	return registry
+	rb.registry.typeMap.Range(func(k, v interface{}) bool {
+		if k != nil && v != nil {
+			r.typeMap.Store(k, v)
+		}
+		return true
+	})
+	return r
 }
 
 // A Registry is used to store and retrieve codecs for types and interfaces. This type is the main
 // typed passed around and Encoders and Decoders are constructed from it.
 type Registry struct {
-	typeEncoders map[reflect.Type]ValueEncoder
-	typeDecoders map[reflect.Type]ValueDecoder
-
 	interfaceEncoders []interfaceValueEncoder
 	interfaceDecoders []interfaceValueDecoder
-
-	kindEncoders map[reflect.Kind]ValueEncoder
-	kindDecoders map[reflect.Kind]ValueDecoder
-
-	typeMap map[bsontype.Type]reflect.Type
-
-	mu sync.RWMutex
+	typeEncoders      *typeEncoderCache
+	typeDecoders      *typeDecoderCache
+	kindEncoders      *kindEncoderCache
+	kindDecoders      *kindDecoderCache
+	typeMap           sync.Map // map[bsontype.Type]reflect.Type
 }
 
 // NewRegistry creates a new empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		typeEncoders: make(map[reflect.Type]ValueEncoder),
-		typeDecoders: make(map[reflect.Type]ValueDecoder),
-
-		interfaceEncoders: make([]interfaceValueEncoder, 0),
-		interfaceDecoders: make([]interfaceValueDecoder, 0),
-
-		kindEncoders: make(map[reflect.Kind]ValueEncoder),
-		kindDecoders: make(map[reflect.Kind]ValueDecoder),
-
-		typeMap: make(map[bsontype.Type]reflect.Type),
+		typeEncoders: new(typeEncoderCache),
+		typeDecoders: new(typeDecoderCache),
+		kindEncoders: new(kindEncoderCache),
+		kindDecoders: new(kindDecoderCache),
 	}
 }
 
@@ -284,7 +266,7 @@ func NewRegistry() *Registry {
 //
 // RegisterTypeEncoder should not be called concurrently with any other Registry method.
 func (r *Registry) RegisterTypeEncoder(valueType reflect.Type, enc ValueEncoder) {
-	r.typeEncoders[valueType] = enc
+	r.typeEncoders.Store(valueType, enc)
 }
 
 // RegisterTypeDecoder registers the provided ValueDecoder for the provided type.
@@ -298,7 +280,7 @@ func (r *Registry) RegisterTypeEncoder(valueType reflect.Type, enc ValueEncoder)
 //
 // RegisterTypeDecoder should not be called concurrently with any other Registry method.
 func (r *Registry) RegisterTypeDecoder(valueType reflect.Type, dec ValueDecoder) {
-	r.typeDecoders[valueType] = dec
+	r.typeDecoders.Store(valueType, dec)
 }
 
 // RegisterKindEncoder registers the provided ValueEncoder for the provided kind.
@@ -314,7 +296,7 @@ func (r *Registry) RegisterTypeDecoder(valueType reflect.Type, dec ValueDecoder)
 //
 // RegisterKindEncoder should not be called concurrently with any other Registry method.
 func (r *Registry) RegisterKindEncoder(kind reflect.Kind, enc ValueEncoder) {
-	r.kindEncoders[kind] = enc
+	r.kindEncoders.Store(kind, enc)
 }
 
 // RegisterKindDecoder registers the provided ValueDecoder for the provided kind.
@@ -330,7 +312,7 @@ func (r *Registry) RegisterKindEncoder(kind reflect.Kind, enc ValueEncoder) {
 //
 // RegisterKindDecoder should not be called concurrently with any other Registry method.
 func (r *Registry) RegisterKindDecoder(kind reflect.Kind, dec ValueDecoder) {
-	r.kindDecoders[kind] = dec
+	r.kindDecoders.Store(kind, dec)
 }
 
 // RegisterInterfaceEncoder registers an encoder for the provided interface type iface. This encoder will
@@ -389,7 +371,7 @@ func (r *Registry) RegisterInterfaceDecoder(iface reflect.Type, dec ValueDecoder
 //
 //	reg.RegisterTypeMapEntry(bsontype.EmbeddedDocument, reflect.TypeOf(bson.Raw{}))
 func (r *Registry) RegisterTypeMapEntry(bt bsontype.Type, rt reflect.Type) {
-	r.typeMap[bt] = rt
+	r.typeMap.Store(bt, rt)
 }
 
 // LookupEncoder returns the first matching encoder in the Registry. It uses the following lookup
@@ -406,9 +388,7 @@ func (r *Registry) RegisterTypeMapEntry(bt bsontype.Type, rt reflect.Type) {
 // If no encoder is found, an error of type ErrNoEncoder is returned. LookupEncoder is safe for
 // concurrent use by multiple goroutines after all codecs and encoders are registered.
 func (r *Registry) LookupEncoder(valueType reflect.Type) (ValueEncoder, error) {
-	r.mu.RLock()
 	enc, found := r.lookupTypeEncoder(valueType)
-	r.mu.RUnlock()
 	if found {
 		if enc == nil {
 			return nil, ErrNoEncoder{Type: valueType}
@@ -418,36 +398,26 @@ func (r *Registry) LookupEncoder(valueType reflect.Type) (ValueEncoder, error) {
 
 	enc, found = r.lookupInterfaceEncoder(valueType, true)
 	if found {
-		r.mu.Lock()
-		r.typeEncoders[valueType] = enc
-		r.mu.Unlock()
-		return enc, nil
+		return r.typeEncoders.LoadOrStore(valueType, enc), nil
 	}
-
 	if valueType == nil {
-		r.mu.Lock()
-		r.typeEncoders[valueType] = nil
-		r.mu.Unlock()
+		r.storeTypeEncoder(valueType, nil)
 		return nil, ErrNoEncoder{Type: valueType}
 	}
 
-	enc, found = r.kindEncoders[valueType.Kind()]
-	if !found {
-		r.mu.Lock()
-		r.typeEncoders[valueType] = nil
-		r.mu.Unlock()
-		return nil, ErrNoEncoder{Type: valueType}
+	if v, ok := r.kindEncoders.Load(valueType.Kind()); ok {
+		return r.storeTypeEncoder(valueType, v), nil
 	}
-
-	r.mu.Lock()
-	r.typeEncoders[valueType] = enc
-	r.mu.Unlock()
-	return enc, nil
+	r.storeTypeEncoder(valueType, nil)
+	return nil, ErrNoEncoder{Type: valueType}
 }
 
-func (r *Registry) lookupTypeEncoder(valueType reflect.Type) (ValueEncoder, bool) {
-	enc, found := r.typeEncoders[valueType]
-	return enc, found
+func (r *Registry) storeTypeEncoder(rt reflect.Type, enc ValueEncoder) ValueEncoder {
+	return r.typeEncoders.LoadOrStore(rt, enc)
+}
+
+func (r *Registry) lookupTypeEncoder(rt reflect.Type) (ValueEncoder, bool) {
+	return r.typeEncoders.Load(rt)
 }
 
 func (r *Registry) lookupInterfaceEncoder(valueType reflect.Type, allowAddr bool) (ValueEncoder, bool) {
@@ -463,7 +433,7 @@ func (r *Registry) lookupInterfaceEncoder(valueType reflect.Type, allowAddr bool
 			// ahead in interfaceEncoders
 			defaultEnc, found := r.lookupInterfaceEncoder(valueType, false)
 			if !found {
-				defaultEnc = r.kindEncoders[valueType.Kind()]
+				defaultEnc, _ = r.kindEncoders.Load(valueType.Kind())
 			}
 			return newCondAddrEncoder(ienc.ve, defaultEnc), true
 		}
@@ -488,10 +458,7 @@ func (r *Registry) LookupDecoder(valueType reflect.Type) (ValueDecoder, error) {
 	if valueType == nil {
 		return nil, ErrNilType
 	}
-	decodererr := ErrNoDecoder{Type: valueType}
-	r.mu.RLock()
 	dec, found := r.lookupTypeDecoder(valueType)
-	r.mu.RUnlock()
 	if found {
 		if dec == nil {
 			return nil, ErrNoDecoder{Type: valueType}
@@ -501,29 +468,22 @@ func (r *Registry) LookupDecoder(valueType reflect.Type) (ValueDecoder, error) {
 
 	dec, found = r.lookupInterfaceDecoder(valueType, true)
 	if found {
-		r.mu.Lock()
-		r.typeDecoders[valueType] = dec
-		r.mu.Unlock()
-		return dec, nil
+		return r.storeTypeDecoder(valueType, dec), nil
 	}
 
-	dec, found = r.kindDecoders[valueType.Kind()]
-	if !found {
-		r.mu.Lock()
-		r.typeDecoders[valueType] = nil
-		r.mu.Unlock()
-		return nil, decodererr
+	if v, ok := r.kindDecoders.Load(valueType.Kind()); ok {
+		return r.storeTypeDecoder(valueType, v), nil
 	}
-
-	r.mu.Lock()
-	r.typeDecoders[valueType] = dec
-	r.mu.Unlock()
-	return dec, nil
+	r.storeTypeDecoder(valueType, nil)
+	return nil, ErrNoDecoder{Type: valueType}
 }
 
 func (r *Registry) lookupTypeDecoder(valueType reflect.Type) (ValueDecoder, bool) {
-	dec, found := r.typeDecoders[valueType]
-	return dec, found
+	return r.typeDecoders.Load(valueType)
+}
+
+func (r *Registry) storeTypeDecoder(typ reflect.Type, dec ValueDecoder) ValueDecoder {
+	return r.typeDecoders.LoadOrStore(typ, dec)
 }
 
 func (r *Registry) lookupInterfaceDecoder(valueType reflect.Type, allowAddr bool) (ValueDecoder, bool) {
@@ -536,7 +496,7 @@ func (r *Registry) lookupInterfaceDecoder(valueType reflect.Type, allowAddr bool
 			// ahead in interfaceDecoders
 			defaultDec, found := r.lookupInterfaceDecoder(valueType, false)
 			if !found {
-				defaultDec = r.kindDecoders[valueType.Kind()]
+				defaultDec, _ = r.kindDecoders.Load(valueType.Kind())
 			}
 			return newCondAddrDecoder(idec.vd, defaultDec), true
 		}
@@ -549,11 +509,11 @@ func (r *Registry) lookupInterfaceDecoder(valueType reflect.Type, allowAddr bool
 //
 // LookupTypeMapEntry should not be called concurrently with any other Registry method.
 func (r *Registry) LookupTypeMapEntry(bt bsontype.Type) (reflect.Type, error) {
-	t, ok := r.typeMap[bt]
-	if !ok || t == nil {
+	v, ok := r.typeMap.Load(bt)
+	if v == nil || !ok {
 		return nil, ErrNoTypeMapEntry{Type: bt}
 	}
-	return t, nil
+	return v.(reflect.Type), nil
 }
 
 type interfaceValueEncoder struct {

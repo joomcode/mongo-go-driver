@@ -12,9 +12,11 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/bsonutil"
+	"go.mongodb.org/mongo-driver/internal/handshake"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/version"
@@ -29,6 +31,7 @@ import (
 // sharded clusters is 512.
 const maxClientMetadataSize = 512
 
+const awsLambdaPrefix = "AWS_Lambda_"
 const driverName = "mongo-go-driver"
 
 // Hello is used to run the handshake operation.
@@ -171,14 +174,21 @@ func getFaasEnvName() string {
 	names := make(map[string]struct{})
 
 	for _, envVar := range envVars {
-		if os.Getenv(envVar) == "" {
+		val := os.Getenv(envVar)
+		if val == "" {
 			continue
 		}
 
 		var name string
 
 		switch envVar {
-		case envVarAWSExecutionEnv, envVarAWSLambdaRuntimeAPI:
+		case envVarAWSExecutionEnv:
+			if !strings.HasPrefix(val, awsLambdaPrefix) {
+				continue
+			}
+
+			name = envNameAWSLambda
+		case envVarAWSLambdaRuntimeAPI:
 			name = envNameAWSLambda
 		case envVarFunctionsWorkerRuntime:
 			name = envNameAzureFunc
@@ -489,7 +499,7 @@ func (h *Hello) command(dst []byte, desc description.SelectedServer) ([]byte, er
 	if desc.Kind == description.LoadBalanced || h.serverAPI != nil || desc.Server.HelloOK {
 		dst = bsoncore.AppendInt32Element(dst, "hello", 1)
 	} else {
-		dst = bsoncore.AppendInt32Element(dst, internal.LegacyHello, 1)
+		dst = bsoncore.AppendInt32Element(dst, handshake.LegacyHello, 1)
 	}
 	dst = bsoncore.AppendBooleanElement(dst, "helloOk", true)
 
@@ -565,13 +575,13 @@ func (h *Hello) GetHandshakeInformation(ctx context.Context, _ address.Address, 
 	if speculativeAuthenticate, ok := h.res.Lookup("speculativeAuthenticate").DocumentOK(); ok {
 		info.SpeculativeAuthenticate = speculativeAuthenticate
 	}
-	if serverConnectionID, ok := h.res.Lookup("connectionId").Int32OK(); ok {
+	if serverConnectionID, ok := h.res.Lookup("connectionId").AsInt64OK(); ok {
 		info.ServerConnectionID = &serverConnectionID
 	}
 	// Cast to bson.Raw to lookup saslSupportedMechs to avoid converting from bsoncore.Value to bson.RawValue for the
 	// StringSliceFromRawValue call.
 	if saslSupportedMechs, lookupErr := bson.Raw(h.res).LookupErr("saslSupportedMechs"); lookupErr == nil {
-		info.SaslSupportedMechs, err = internal.StringSliceFromRawValue("saslSupportedMechs", saslSupportedMechs)
+		info.SaslSupportedMechs, err = bsonutil.StringSliceFromRawValue("saslSupportedMechs", saslSupportedMechs)
 	}
 	return info, err
 }

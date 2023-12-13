@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -21,7 +22,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/event"
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/csot"
+	"go.mongodb.org/mongo-driver/internal/errutil"
+	"go.mongodb.org/mongo-driver/internal/handshake"
 	"go.mongodb.org/mongo-driver/internal/logger"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
@@ -96,7 +99,8 @@ type startedInformation struct {
 	cmdName                  string
 	documentSequenceIncluded bool
 	connID                   string
-	serverConnID             *int32
+	driverConnectionID       uint64 // TODO(GODRIVER-2824): change type to int64.
+	serverConnID             *int64
 	redacted                 bool
 	serviceID                *primitive.ObjectID
 	serverAddress            address.Address
@@ -104,16 +108,33 @@ type startedInformation struct {
 
 // finishedInformation keeps track of all of the information necessary for monitoring success and failure events.
 type finishedInformation struct {
-	cmdName       string
-	requestID     int32
-	response      bsoncore.Document
-	cmdErr        error
-	connID        string
-	serverConnID  *int32
-	redacted      bool
-	serviceID     *primitive.ObjectID
-	serverAddress address.Address
-	duration      time.Duration
+	cmdName            string
+	requestID          int32
+	response           bsoncore.Document
+	cmdErr             error
+	connID             string
+	driverConnectionID uint64 // TODO(GODRIVER-2824): change type to int64.
+	serverConnID       *int64
+	redacted           bool
+	serviceID          *primitive.ObjectID
+	serverAddress      address.Address
+	duration           time.Duration
+}
+
+// convertInt64PtrToInt32Ptr will convert an int64 pointer reference to an int32 pointer
+// reference. If the int64 value cannot be converted to int32 without causing
+// an overflow, then this function will return nil.
+func convertInt64PtrToInt32Ptr(i64 *int64) *int32 {
+	if i64 == nil {
+		return nil
+	}
+
+	if *i64 > math.MaxInt32 || *i64 < math.MinInt32 {
+		return nil
+	}
+
+	i32 := int32(*i64)
+	return &i32
 }
 
 // success returns true if there was no command error or the command error is a
@@ -289,6 +310,12 @@ type Operation struct {
 
 	// cmdName is only set when serializing OP_MSG and is used internally in readWireMessage.
 	cmdName string
+
+	// omitReadPreference is a boolean that indicates whether to omit the
+	// read preference from the command. This omition includes the case
+	// where a default read preference is used when the operation
+	// ReadPreference is not specified.
+	omitReadPreference bool
 }
 
 // shouldEncrypt returns true if this operation should automatically be encrypted.
@@ -398,8 +425,8 @@ func (op Operation) Execute(ctx context.Context) error {
 
 	// If no deadline is set on the passed-in context, op.Timeout is set, and context is not already
 	// a Timeout context, honor op.Timeout in new Timeout context for operation execution.
-	if _, deadlineSet := ctx.Deadline(); !deadlineSet && op.Timeout != nil && !internal.IsTimeoutContext(ctx) {
-		newCtx, cancelFunc := internal.MakeTimeoutContext(ctx, *op.Timeout)
+	if _, deadlineSet := ctx.Deadline(); !deadlineSet && op.Timeout != nil && !csot.IsTimeoutContext(ctx) {
+		newCtx, cancelFunc := csot.MakeTimeoutContext(ctx, *op.Timeout)
 		// Redefine ctx to be the new timeout-derived context.
 		ctx = newCtx
 		// Cancel the timeout-derived context at the end of Execute to avoid a context leak.
@@ -437,7 +464,7 @@ func (op Operation) Execute(ctx context.Context) error {
 	// If context is a Timeout context, automatically set retries to -1 (infinite) if retrying is
 	// enabled.
 	retryEnabled := op.RetryMode != nil && op.RetryMode.Enabled()
-	if internal.IsTimeoutContext(ctx) && retryEnabled {
+	if csot.IsTimeoutContext(ctx) && retryEnabled {
 		retries = -1
 	}
 
@@ -606,6 +633,7 @@ func (op Operation) Execute(ctx context.Context) error {
 
 		// set extra data and send event if possible
 		startedInfo.connID = conn.ID()
+		startedInfo.driverConnectionID = conn.DriverConnectionID()
 		startedInfo.cmdName = op.getCommandName(startedInfo.cmd)
 		op.cmdName = startedInfo.cmdName
 		startedInfo.redacted = op.redactCommand(startedInfo.cmdName, startedInfo.cmd)
@@ -630,13 +658,14 @@ func (op Operation) Execute(ctx context.Context) error {
 		}
 
 		finishedInfo := finishedInformation{
-			cmdName:       startedInfo.cmdName,
-			requestID:     startedInfo.requestID,
-			connID:        startedInfo.connID,
-			serverConnID:  startedInfo.serverConnID,
-			redacted:      startedInfo.redacted,
-			serviceID:     startedInfo.serviceID,
-			serverAddress: desc.Server.Addr,
+			cmdName:            startedInfo.cmdName,
+			driverConnectionID: startedInfo.driverConnectionID,
+			requestID:          startedInfo.requestID,
+			connID:             startedInfo.connID,
+			serverConnID:       startedInfo.serverConnID,
+			redacted:           startedInfo.redacted,
+			serviceID:          startedInfo.serviceID,
+			serverAddress:      desc.Server.Addr,
 		}
 
 		startedTime := time.Now()
@@ -647,8 +676,8 @@ func (op Operation) Execute(ctx context.Context) error {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		} else if deadline, ok := ctx.Deadline(); ok {
-			if internal.IsTimeoutContext(ctx) && time.Now().Add(srvr.RTTMonitor().P90()).After(deadline) {
-				err = internal.WrapErrorf(ErrDeadlineWouldBeExceeded,
+			if csot.IsTimeoutContext(ctx) && time.Now().Add(srvr.RTTMonitor().P90()).After(deadline) {
+				err = errutil.WrapErrorf(ErrDeadlineWouldBeExceeded,
 					"remaining time %v until context deadline is less than 90th percentile RTT\n%v", time.Until(deadline), srvr.RTTMonitor().Stats())
 			} else if time.Now().Add(srvr.RTTMonitor().Min()).After(deadline) {
 				err = context.DeadlineExceeded
@@ -882,7 +911,7 @@ func (op Operation) Execute(ctx context.Context) error {
 				}
 				// Reset the retries number for RetryOncePerCommand unless context is a Timeout context, in
 				// which case retries should remain as -1 (as many times as possible).
-				if *op.RetryMode == RetryOncePerCommand && !internal.IsTimeoutContext(ctx) {
+				if *op.RetryMode == RetryOncePerCommand && !csot.IsTimeoutContext(ctx) {
 					retries = 1
 				}
 			}
@@ -1406,7 +1435,7 @@ func (op Operation) addClusterTime(dst []byte, desc description.SelectedServer) 
 // operation's MaxTimeMS if set. If no MaxTimeMS is set on the operation, and context is
 // not a Timeout context, calculateMaxTimeMS returns 0.
 func (op Operation) calculateMaxTimeMS(ctx context.Context, rtt90 time.Duration, rttStats string) (uint64, error) {
-	if internal.IsTimeoutContext(ctx) {
+	if csot.IsTimeoutContext(ctx) {
 		if deadline, ok := ctx.Deadline(); ok {
 			remainingTimeout := time.Until(deadline)
 			maxTime := remainingTimeout - rtt90
@@ -1415,7 +1444,7 @@ func (op Operation) calculateMaxTimeMS(ctx context.Context, rtt90 time.Duration,
 			// maxTimeMS value (e.g. 400 microseconds evaluates to 1ms, not 0ms).
 			maxTimeMS := int64((maxTime + (time.Millisecond - 1)) / time.Millisecond)
 			if maxTimeMS <= 0 {
-				return 0, internal.WrapErrorf(ErrDeadlineWouldBeExceeded,
+				return 0, errutil.WrapErrorf(ErrDeadlineWouldBeExceeded,
 					"remaining time %v until context deadline is less than or equal to 90th percentile RTT\n%v",
 					remainingTimeout, rttStats)
 			}
@@ -1494,6 +1523,10 @@ func (op Operation) getReadPrefBasedOnTransaction() (*readpref.ReadPref, error) 
 }
 
 func (op Operation) createReadPref(desc description.SelectedServer, isOpQuery bool) (bsoncore.Document, error) {
+	if op.omitReadPreference {
+		return nil, nil
+	}
+
 	// TODO(GODRIVER-2231): Instead of checking if isOutputAggregate and desc.Server.WireVersion.Max < 13, somehow check
 	// TODO if supplied readPreference was "overwritten" with primary in description.selectForReplicaSet.
 	if desc.Server.Kind == description.Standalone || (isOpQuery && desc.Server.Kind != description.Mongos) ||
@@ -1596,7 +1629,7 @@ func (op Operation) secondaryOK(desc description.SelectedServer) wiremessage.Que
 }
 
 func (Operation) canCompress(cmd string) bool {
-	if cmd == internal.LegacyHello || cmd == "hello" || cmd == "saslStart" || cmd == "saslContinue" || cmd == "getnonce" || cmd == "authenticate" ||
+	if cmd == handshake.LegacyHello || cmd == "hello" || cmd == "saslStart" || cmd == "saslContinue" || cmd == "getnonce" || cmd == "authenticate" ||
 		cmd == "createUser" || cmd == "updateUser" || cmd == "copydbSaslStart" || cmd == "copydbgetnonce" || cmd == "copydb" {
 		return false
 	}
@@ -1728,7 +1761,7 @@ func (op *Operation) redactCommand(cmd string, doc bsoncore.Document) bool {
 
 		return true
 	}
-	if strings.ToLower(cmd) != internal.LegacyHelloLowercase && cmd != "hello" {
+	if strings.ToLower(cmd) != handshake.LegacyHelloLowercase && cmd != "hello" {
 		return false
 	}
 
@@ -1761,6 +1794,7 @@ func (op Operation) publishStartedEvent(ctx context.Context, info startedInforma
 			logger.ComponentCommand,
 			logger.CommandStarted,
 			logger.SerializeCommand(logger.Command{
+				DriverConnectionID: info.driverConnectionID,
 				Message:            logger.CommandStarted,
 				Name:               info.cmdName,
 				RequestID:          int64(info.requestID),
@@ -1770,20 +1804,20 @@ func (op Operation) publishStartedEvent(ctx context.Context, info startedInforma
 				ServiceID:          info.serviceID,
 			},
 				logger.KeyCommand, formattedCmd,
-				logger.KeyDriverConnectionID, info.connID,
 				logger.KeyDatabaseName, op.Database)...)
 
 	}
 
 	if op.canPublishStartedEvent() {
 		started := &event.CommandStartedEvent{
-			Command:            redactStartedInformationCmd(op, info),
-			DatabaseName:       op.Database,
-			CommandName:        info.cmdName,
-			RequestID:          int64(info.requestID),
-			ConnectionID:       info.connID,
-			ServerConnectionID: info.serverConnID,
-			ServiceID:          info.serviceID,
+			Command:              redactStartedInformationCmd(op, info),
+			DatabaseName:         op.Database,
+			CommandName:          info.cmdName,
+			RequestID:            int64(info.requestID),
+			ConnectionID:         info.connID,
+			ServerConnectionID:   convertInt64PtrToInt32Ptr(info.serverConnID),
+			ServerConnectionID64: info.serverConnID,
+			ServiceID:            info.serviceID,
 		}
 		op.CommandMonitor.Started(ctx, started)
 	}
@@ -1813,6 +1847,7 @@ func (op Operation) publishFinishedEvent(ctx context.Context, info finishedInfor
 			logger.ComponentCommand,
 			logger.CommandSucceeded,
 			logger.SerializeCommand(logger.Command{
+				DriverConnectionID: info.driverConnectionID,
 				Message:            logger.CommandSucceeded,
 				Name:               info.cmdName,
 				RequestID:          int64(info.requestID),
@@ -1822,7 +1857,6 @@ func (op Operation) publishFinishedEvent(ctx context.Context, info finishedInfor
 				ServiceID:          info.serviceID,
 			},
 				logger.KeyDurationMS, info.duration.Milliseconds(),
-				logger.KeyDriverConnectionID, info.connID,
 				logger.KeyReply, formattedReply)...)
 	}
 
@@ -1835,6 +1869,7 @@ func (op Operation) publishFinishedEvent(ctx context.Context, info finishedInfor
 			logger.ComponentCommand,
 			logger.CommandFailed,
 			logger.SerializeCommand(logger.Command{
+				DriverConnectionID: info.driverConnectionID,
 				Message:            logger.CommandFailed,
 				Name:               info.cmdName,
 				RequestID:          int64(info.requestID),
@@ -1844,7 +1879,6 @@ func (op Operation) publishFinishedEvent(ctx context.Context, info finishedInfor
 				ServiceID:          info.serviceID,
 			},
 				logger.KeyDurationMS, info.duration.Milliseconds(),
-				logger.KeyDriverConnectionID, info.connID,
 				logger.KeyFailure, formattedReply)...)
 	}
 
@@ -1854,13 +1888,14 @@ func (op Operation) publishFinishedEvent(ctx context.Context, info finishedInfor
 	}
 
 	finished := event.CommandFinishedEvent{
-		CommandName:        info.cmdName,
-		RequestID:          int64(info.requestID),
-		ConnectionID:       info.connID,
-		Duration:           info.duration,
-		DurationNanos:      info.duration.Nanoseconds(),
-		ServerConnectionID: info.serverConnID,
-		ServiceID:          info.serviceID,
+		CommandName:          info.cmdName,
+		RequestID:            int64(info.requestID),
+		ConnectionID:         info.connID,
+		Duration:             info.duration,
+		DurationNanos:        info.duration.Nanoseconds(),
+		ServerConnectionID:   convertInt64PtrToInt32Ptr(info.serverConnID),
+		ServerConnectionID64: info.serverConnID,
+		ServiceID:            info.serviceID,
 	}
 
 	if info.success() {

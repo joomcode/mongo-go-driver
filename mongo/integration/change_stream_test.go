@@ -8,6 +8,7 @@ package integration
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/internal/assert"
-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
+	"go.mongodb.org/mongo-driver/internal/eventtest"
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -514,7 +516,7 @@ func TestChangeStream_ReplicaSet(t *testing.T) {
 		// by ChangeStream when executing an aggregate.
 
 		mt.Run("errors are processed for SDAM on initial aggregate", func(mt *mtest.T) {
-			tpm := monitor.NewTestPoolMonitor()
+			tpm := eventtest.NewTestPoolMonitor()
 			mt.ResetClient(options.Client().
 				SetPoolMonitor(tpm.PoolMonitor).
 				SetWriteConcern(mtest.MajorityWc).
@@ -537,7 +539,7 @@ func TestChangeStream_ReplicaSet(t *testing.T) {
 			assert.True(mt, tpm.IsPoolCleared(), "expected pool to be cleared after non-timeout network error but was not")
 		})
 		mt.Run("errors are processed for SDAM on getMore", func(mt *mtest.T) {
-			tpm := monitor.NewTestPoolMonitor()
+			tpm := eventtest.NewTestPoolMonitor()
 			mt.ResetClient(options.Client().
 				SetPoolMonitor(tpm.PoolMonitor).
 				SetWriteConcern(mtest.MajorityWc).
@@ -567,7 +569,7 @@ func TestChangeStream_ReplicaSet(t *testing.T) {
 			assert.True(mt, tpm.IsPoolCleared(), "expected pool to be cleared after non-timeout network error but was not")
 		})
 		mt.Run("errors are processed for SDAM on retried aggregate", func(mt *mtest.T) {
-			tpm := monitor.NewTestPoolMonitor()
+			tpm := eventtest.NewTestPoolMonitor()
 			mt.ResetClient(options.Client().
 				SetPoolMonitor(tpm.PoolMonitor).
 				SetRetryReads(true))
@@ -681,6 +683,43 @@ func TestChangeStream_ReplicaSet(t *testing.T) {
 		acfc, ok := acfcVal.BooleanOK()
 		assert.True(mt, ok, "expected field 'allChangesForCluster' to be boolean, got %v", acfcVal.Type.String())
 		assert.False(mt, acfc, "expected field 'allChangesForCluster' to be false, got %v", acfc)
+	})
+
+	withBSONOpts := mtest.NewOptions().ClientOptions(
+		options.Client().SetBSONOptions(&options.BSONOptions{
+			UseJSONStructTags: true,
+		}))
+	mt.RunOpts("with BSONOptions", withBSONOpts, func(mt *mtest.T) {
+		cs, err := mt.Coll.Watch(context.Background(), mongo.Pipeline{})
+		require.NoError(mt, err, "Watch error")
+		defer closeStream(cs)
+
+		type myDocument struct {
+			A string `json:"x"`
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := mt.Coll.InsertOne(context.Background(), myDocument{A: "foo"})
+			require.NoError(mt, err, "InsertOne error")
+		}()
+
+		cs.Next(context.Background())
+
+		var got struct {
+			FullDocument myDocument `bson:"fullDocument"`
+		}
+		err = cs.Decode(&got)
+		require.NoError(mt, err, "Decode error")
+
+		want := myDocument{
+			A: "foo",
+		}
+		assert.Equal(mt, want, got.FullDocument, "expected and actual Decode results are different")
+
+		wg.Wait()
 	})
 }
 

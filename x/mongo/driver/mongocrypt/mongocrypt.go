@@ -23,7 +23,8 @@ import (
 	"unsafe"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/errutil"
+	"go.mongodb.org/mongo-driver/internal/httputil"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/auth/creds"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/mongocrypt/options"
@@ -55,7 +56,7 @@ func NewMongoCrypt(opts *options.MongoCryptOptions) (*MongoCrypt, error) {
 	}
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
-		httpClient = internal.DefaultHTTPClient
+		httpClient = httputil.DefaultHTTPClient
 	}
 	kmsProviders := make(map[string]kmsProvider)
 	if needsKmsProvider(opts.KmsProviders, "gcp") {
@@ -86,11 +87,6 @@ func NewMongoCrypt(opts *options.MongoCryptOptions) (*MongoCrypt, error) {
 
 	if opts.BypassQueryAnalysis {
 		C.mongocrypt_setopt_bypass_query_analysis(wrapped)
-	}
-
-	// Enable Queryable Encryption V2 protocol.
-	if !C.mongocrypt_setopt_fle2v2(wrapped, true) {
-		return nil, crypt.createErrorFromStatus()
 	}
 
 	// If loading the crypt_shared library isn't disabled, set the default library search path "$SYSTEM"
@@ -386,8 +382,8 @@ func (m *MongoCrypt) CryptSharedLibVersionString() string {
 // Close cleans up any resources associated with the given MongoCrypt instance.
 func (m *MongoCrypt) Close() {
 	C.mongocrypt_destroy(m.wrapped)
-	if m.httpClient == internal.DefaultHTTPClient {
-		internal.CloseIdleHTTPConnections(m.httpClient)
+	if m.httpClient == httputil.DefaultHTTPClient {
+		httputil.CloseIdleHTTPConnections(m.httpClient)
 	}
 }
 
@@ -399,6 +395,11 @@ func (m *MongoCrypt) RewrapDataKeyContext(filter []byte, opts *options.RewrapMan
 	ctx := newContext(C.mongocrypt_ctx_new(m.wrapped))
 	if ctx.wrapped == nil {
 		return nil, m.createErrorFromStatus()
+	}
+
+	if opts.MasterKey != nil && opts.Provider == nil {
+		// Provider is nil, but MasterKey is set. This is an error.
+		return nil, fmt.Errorf("expected 'Provider' to be set to identify type of 'MasterKey'")
 	}
 
 	if opts.Provider != nil {
@@ -511,7 +512,7 @@ func (m *MongoCrypt) GetKmsProviders(ctx context.Context) (bsoncore.Document, er
 	for k, p := range m.kmsProviders {
 		doc, err := p.GetCredentialsDoc(ctx)
 		if err != nil {
-			return nil, internal.WrapErrorf(err, "unable to retrieve %s credentials", k)
+			return nil, errutil.WrapErrorf(err, "unable to retrieve %s credentials", k)
 		}
 		builder.AppendDocument(k, doc)
 	}

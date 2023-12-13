@@ -10,14 +10,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/internal"
 	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/csot"
+	"go.mongodb.org/mongo-driver/internal/handshake"
 	"go.mongodb.org/mongo-driver/internal/uuid"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
@@ -254,7 +256,7 @@ func TestOperation(t *testing.T) {
 		negMaxTime := -2 * time.Second
 		shortRTT := 50 * time.Millisecond
 		longRTT := 10 * time.Second
-		timeoutCtx, cancel := internal.MakeTimeoutContext(context.Background(), timeout)
+		timeoutCtx, cancel := csot.MakeTimeoutContext(context.Background(), timeout)
 		defer cancel()
 
 		testCases := []struct {
@@ -612,7 +614,7 @@ func TestOperation(t *testing.T) {
 		}
 		op := Operation{
 			CommandFn: func(dst []byte, desc description.SelectedServer) ([]byte, error) {
-				return bsoncore.AppendInt32Element(dst, internal.LegacyHello, 1), nil
+				return bsoncore.AppendInt32Element(dst, handshake.LegacyHello, 1), nil
 			},
 			Database:   "admin",
 			Deployment: SingleConnectionDeployment{conn},
@@ -748,7 +750,7 @@ type mockConnection struct {
 	rDesc         description.Server
 	rCloseErr     error
 	rID           string
-	rServerConnID *int32
+	rServerConnID *int64
 	rAddr         address.Address
 	rCanStream    bool
 	rStreaming    bool
@@ -757,12 +759,15 @@ type mockConnection struct {
 func (m *mockConnection) Description() description.Server { return m.rDesc }
 func (m *mockConnection) Close() error                    { return m.rCloseErr }
 func (m *mockConnection) ID() string                      { return m.rID }
-func (m *mockConnection) ServerConnectionID() *int32      { return m.rServerConnID }
+func (m *mockConnection) ServerConnectionID() *int64      { return m.rServerConnID }
 func (m *mockConnection) Address() address.Address        { return m.rAddr }
 func (m *mockConnection) SupportsStreaming() bool         { return m.rCanStream }
 func (m *mockConnection) CurrentlyStreaming() bool        { return m.rStreaming }
 func (m *mockConnection) SetStreaming(streaming bool)     { m.rStreaming = streaming }
 func (m *mockConnection) Stale() bool                     { return false }
+
+// TODO:(GODRIVER-2824) replace return type with int64.
+func (m *mockConnection) DriverConnectionID() uint64 { return 0 }
 
 func (m *mockConnection) WriteWireMessage(_ context.Context, wm []byte) error {
 	m.pWriteWM = wm
@@ -801,7 +806,7 @@ func (ms *mockRetryServer) Connection(ctx context.Context) (Connection, error) {
 }
 
 func (ms *mockRetryServer) RTTMonitor() RTTMonitor {
-	return &internal.ZeroRTTMonitor{}
+	return &csot.ZeroRTTMonitor{}
 }
 
 func TestRetry(t *testing.T) {
@@ -834,5 +839,76 @@ func TestRetry(t *testing.T) {
 		assert.True(t,
 			time.Now().After(deadline),
 			"expected operation to complete only after the context deadline is exceeded")
+	})
+}
+
+func TestConvertI64PtrToI32Ptr(t *testing.T) {
+	t.Parallel()
+
+	newI64 := func(i64 int64) *int64 { return &i64 }
+	newI32 := func(i32 int32) *int32 { return &i32 }
+
+	tests := []struct {
+		name string
+		i64  *int64
+		want *int32
+	}{
+		{
+			name: "empty",
+			want: nil,
+		},
+		{
+			name: "in bounds",
+			i64:  newI64(1),
+			want: newI32(1),
+		},
+		{
+			name: "out of bounds negative",
+			i64:  newI64(math.MinInt32 - 1),
+		},
+		{
+			name: "out of bounds positive",
+			i64:  newI64(math.MaxInt32 + 1),
+		},
+		{
+			name: "exact min int32",
+			i64:  newI64(math.MinInt32),
+			want: newI32(math.MinInt32),
+		},
+		{
+			name: "exact max int32",
+			i64:  newI64(math.MaxInt32),
+			want: newI32(math.MaxInt32),
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := convertInt64PtrToInt32Ptr(test.i64)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestDecodeOpReply(t *testing.T) {
+	t.Parallel()
+
+	// GODRIVER-2869: Prevent infinite loop caused by malformatted wiremessage with length of 0.
+	t.Run("malformatted wiremessage with length of 0", func(t *testing.T) {
+		t.Parallel()
+
+		var wm []byte
+		wm = wiremessage.AppendReplyFlags(wm, 0)
+		wm = wiremessage.AppendReplyCursorID(wm, int64(0))
+		wm = wiremessage.AppendReplyStartingFrom(wm, 0)
+		wm = wiremessage.AppendReplyNumberReturned(wm, 0)
+		idx, wm := bsoncore.ReserveLength(wm)
+		wm = bsoncore.UpdateLength(wm, idx, 0)
+		reply := Operation{}.decodeOpReply(wm)
+		assert.Equal(t, []bsoncore.Document(nil), reply.documents)
 	})
 }

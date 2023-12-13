@@ -11,7 +11,7 @@ import (
 	"errors"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/csot"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -90,9 +90,15 @@ func (*connection) ID() string {
 	return "<mock_connection>"
 }
 
+// DriverConnectionID returns a fixed identifier for the driver pool connection.
+// TODO(GODRIVER-2824): replace return type with int64.
+func (*connection) DriverConnectionID() uint64 {
+	return 0
+}
+
 // ServerConnectionID returns a fixed identifier for the server connection.
-func (*connection) ServerConnectionID() *int32 {
-	serverConnectionID := int32(42)
+func (*connection) ServerConnectionID() *int64 {
+	serverConnectionID := int64(42)
 	return &serverConnectionID
 }
 
@@ -137,7 +143,7 @@ func (md *mockDeployment) Connection(context.Context) (driver.Connection, error)
 
 // RTTMonitor implements the driver.Server interface.
 func (md *mockDeployment) RTTMonitor() driver.RTTMonitor {
-	return &internal.ZeroRTTMonitor{}
+	return &csot.ZeroRTTMonitor{}
 }
 
 // Connect is a no-op method which implements the driver.Connector interface.

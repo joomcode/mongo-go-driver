@@ -17,7 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/internal/assert"
-	"go.mongodb.org/mongo-driver/internal/testutil"
+	"go.mongodb.org/mongo-driver/internal/integtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -32,7 +32,7 @@ var bgCtx = context.Background()
 func setupClient(opts ...*options.ClientOptions) *Client {
 	if len(opts) == 0 {
 		clientOpts := options.Client().ApplyURI("mongodb://localhost:27017")
-		testutil.AddTestServerAPIVersion(clientOpts)
+		integtest.AddTestServerAPIVersion(clientOpts)
 		opts = append(opts, clientOpts)
 	}
 	client, _ := NewClient(opts...)
@@ -75,7 +75,7 @@ func TestClient(t *testing.T) {
 		client.sessionPool = &session.Pool{}
 
 		_, err := client.Watch(bgCtx, nil)
-		watchErr := errors.New("can only transform slices and arrays into aggregation pipelines, but got invalid")
+		watchErr := errors.New("can only marshal slices and arrays into aggregation pipelines, but got invalid")
 		assert.Equal(t, watchErr, err, "expected error %v, got %v", watchErr, err)
 
 		_, err = client.ListDatabases(bgCtx, nil)
@@ -317,7 +317,7 @@ func TestClient(t *testing.T) {
 		})
 	})
 	t.Run("endSessions", func(t *testing.T) {
-		cs := testutil.ConnString(t)
+		cs := integtest.ConnString(t)
 		originalBatchSize := endSessionsBatchSize
 		endSessionsBatchSize = 2
 		defer func() {
@@ -355,7 +355,7 @@ func TestClient(t *testing.T) {
 				}
 				clientOpts := options.Client().ApplyURI(cs.Original).SetReadPreference(readpref.Primary()).
 					SetWriteConcern(writeconcern.New(writeconcern.WMajority())).SetMonitor(cmdMonitor)
-				testutil.AddTestServerAPIVersion(clientOpts)
+				integtest.AddTestServerAPIVersion(clientOpts)
 				client, err := Connect(bgCtx, clientOpts)
 				assert.Nil(t, err, "Connect error: %v", err)
 				defer func() {

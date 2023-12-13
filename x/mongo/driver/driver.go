@@ -10,7 +10,7 @@ import (
 	"context"
 	"time"
 
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/csot"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -68,7 +68,8 @@ type Connection interface {
 	Close() error
 
 	ID() string
-	ServerConnectionID() *int32
+	ServerConnectionID() *int64
+	DriverConnectionID() uint64 // TODO(GODRIVER-2824): change type to int64.
 	Address() address.Address
 	Stale() bool
 }
@@ -88,7 +89,7 @@ type RTTMonitor interface {
 	Stats() string
 }
 
-var _ RTTMonitor = &internal.ZeroRTTMonitor{}
+var _ RTTMonitor = &csot.ZeroRTTMonitor{}
 
 // PinnedConnection represents a Connection that can be pinned by one or more cursors or transactions. Implementations
 // of this interface should maintain the following invariants:
@@ -157,12 +158,6 @@ const (
 	ConnectionPoolCleared
 )
 
-// ServerChanged returns true if the ProcessErrorResult indicates that the server changed from an SDAM perspective
-// during a ProcessError() call.
-func (p ProcessErrorResult) ServerChanged() bool {
-	return p != NoChange
-}
-
 // ErrorProcessor implementations can handle processing errors, which may modify their internal state.
 // If this type is implemented by a Server, then Operation.Execute will call it's ProcessError
 // method after it decodes a wire message.
@@ -178,7 +173,7 @@ type ErrorProcessor interface {
 type HandshakeInformation struct {
 	Description             description.Server
 	SpeculativeAuthenticate bsoncore.Document
-	ServerConnectionID      *int32
+	ServerConnectionID      *int64
 	SaslSupportedMechs      []string
 }
 
@@ -229,7 +224,7 @@ func (ssd SingleConnectionDeployment) Connection(context.Context) (Connection, e
 
 // RTTMonitor implements the driver.Server interface.
 func (ssd SingleConnectionDeployment) RTTMonitor() RTTMonitor {
-	return &internal.ZeroRTTMonitor{}
+	return &csot.ZeroRTTMonitor{}
 }
 
 // TODO(GODRIVER-617): We can likely use 1 type for both the Type and the RetryMode by using 2 bits for the mode and 1

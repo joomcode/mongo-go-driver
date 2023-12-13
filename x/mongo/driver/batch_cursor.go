@@ -14,7 +14,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/event"
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/csot"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/session"
@@ -305,6 +305,12 @@ func (bc *BatchCursor) KillCursor(ctx context.Context) error {
 		Legacy:         LegacyKillCursors,
 		CommandMonitor: bc.cmdMonitor,
 		ServerAPI:      bc.serverAPI,
+
+		// No read preference is passed to the killCursor command,
+		// resulting in the default read preference: "primaryPreferred".
+		// Since this could be confusing, and there is no requirement
+		// to use a read preference here, we omit it.
+		omitReadPreference: true,
 	}.Execute(ctx)
 }
 
@@ -398,6 +404,12 @@ func (bc *BatchCursor) getMore(ctx context.Context) {
 		CommandMonitor: bc.cmdMonitor,
 		Crypt:          bc.crypt,
 		ServerAPI:      bc.serverAPI,
+
+		// No read preference is passed to the getMore command,
+		// resulting in the default read preference: "primaryPreferred".
+		// Since this could be confusing, and there is no requirement
+		// to use a read preference here, we omit it.
+		omitReadPreference: true,
 	}.Execute(ctx)
 
 	// Once the cursor has been drained, we can unpin the connection if one is currently pinned.
@@ -471,7 +483,7 @@ func (lbcd *loadBalancedCursorDeployment) Connection(_ context.Context) (Connect
 
 // RTTMonitor implements the driver.Server interface.
 func (lbcd *loadBalancedCursorDeployment) RTTMonitor() RTTMonitor {
-	return &internal.ZeroRTTMonitor{}
+	return &csot.ZeroRTTMonitor{}
 }
 
 func (lbcd *loadBalancedCursorDeployment) ProcessError(err error, conn Connection) ProcessErrorResult {

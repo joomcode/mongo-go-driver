@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal"
 	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/handshake"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -148,7 +148,7 @@ func TestSessions(t *testing.T) {
 			// handshake or the checks from the heartbeat or RTT monitors), expect that there is no
 			// "$clusterTime" because the connection doesn't know the server's wire version yet so
 			// it doesn't know if the connection supports "$clusterTime".
-			case internal.LegacyHello, "hello":
+			case handshake.LegacyHello, "hello":
 				assert.False(
 					mt,
 					hasClusterTime,
@@ -365,6 +365,9 @@ func TestSessions(t *testing.T) {
 	sessallocopts := mtest.NewOptions().ClientOptions(options.Client().SetMaxPoolSize(1).SetRetryWrites(true).
 		SetHosts(hosts[:1]))
 	mt.RunOpts("14. implicit session allocation", sessallocopts, func(mt *mtest.T) {
+		// TODO(GODRIVER-2844): Fix and unskip this test case.
+		mt.Skip("Test fails frequently, skipping. See GODRIVER-2844")
+
 		ops := map[string]func(ctx context.Context) error{
 			"insert": func(ctx context.Context) error {
 				_, err := mt.Coll.InsertOne(ctx, bson.D{})

@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.mongodb.org/mongo-driver/internal"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -70,12 +69,14 @@ type connection struct {
 	currentlyStreaming   bool
 	connectContextMutex  sync.Mutex
 	cancellationListener cancellationListener
-	serverConnectionID   *int32 // the server's ID for this client's connection
+	serverConnectionID   *int64 // the server's ID for this client's connection
 
 	// pool related fields
-	pool       *pool
-	poolID     uint64
-	generation uint64
+	pool *pool
+
+	// TODO(GODRIVER-2824): change driverConnectionID type to int64.
+	driverConnectionID uint64
+	generation         uint64
 }
 
 // newConnection handles the creation of a connection. It does not connect the connection.
@@ -93,7 +94,7 @@ func newConnection(addr address.Address, opts ...ConnectionOption) *connection {
 		connectDone:          make(chan struct{}),
 		config:               cfg,
 		connectContextMade:   make(chan struct{}),
-		cancellationListener: internal.NewCancellationListener(),
+		cancellationListener: newCancellListener(),
 	}
 	// Connections to non-load balanced deployments should eagerly set the generation numbers so errors encountered
 	// at any point during connection establishment can be processed without the connection being considered stale.
@@ -103,6 +104,12 @@ func newConnection(addr address.Address, opts ...ConnectionOption) *connection {
 	atomic.StoreInt64(&c.state, connInitialized)
 
 	return c
+}
+
+// DriverConnectionID returns the driver connection ID.
+// TODO(GODRIVER-2824): change return type to int64.
+func (c *connection) DriverConnectionID() uint64 {
+	return c.driverConnectionID
 }
 
 // setGenerationNumber sets the connection's generation number if a callback has been provided to do so in connection
@@ -527,7 +534,7 @@ func (c *connection) ID() string {
 	return c.id
 }
 
-func (c *connection) ServerConnectionID() *int32 {
+func (c *connection) ServerConnectionID() *int64 {
 	return c.serverConnectionID
 }
 
@@ -708,7 +715,7 @@ func (c *Connection) ID() string {
 }
 
 // ServerConnectionID returns the server connection ID of this connection.
-func (c *Connection) ServerConnectionID() *int32 {
+func (c *Connection) ServerConnectionID() *int64 {
 	if c.connection == nil {
 		return nil
 	}
@@ -794,6 +801,12 @@ func (c *Connection) unpin(reason string) error {
 	return nil
 }
 
+// DriverConnectionID returns the driver connection ID.
+// TODO(GODRIVER-2824): change return type to int64.
+func (c *Connection) DriverConnectionID() uint64 {
+	return c.connection.DriverConnectionID()
+}
+
 func configureTLS(ctx context.Context,
 	tlsConnSource tlsConnectionSource,
 	nc net.Conn,
@@ -825,4 +838,48 @@ func configureTLS(ctx context.Context,
 		}
 	}
 	return client, nil
+}
+
+// TODO: Naming?
+
+// cancellListener listens for context cancellation and notifies listeners via a
+// callback function.
+type cancellListener struct {
+	aborted bool
+	done    chan struct{}
+}
+
+// newCancellListener constructs a cancellListener.
+func newCancellListener() *cancellListener {
+	return &cancellListener{
+		done: make(chan struct{}),
+	}
+}
+
+// Listen blocks until the provided context is cancelled or listening is aborted
+// via the StopListening function. If this detects that the context has been
+// cancelled (i.e. ctx.Err() == context.Canceled), the provided callback is
+// called to abort in-progress work. Even if the context expires, this function
+// will block until StopListening is called.
+func (c *cancellListener) Listen(ctx context.Context, abortFn func()) {
+	c.aborted = false
+
+	select {
+	case <-ctx.Done():
+		if ctx.Err() == context.Canceled {
+			c.aborted = true
+			abortFn()
+		}
+
+		<-c.done
+	case <-c.done:
+	}
+}
+
+// StopListening stops the in-progress Listen call. This blocks if there is no
+// in-progress Listen call. This function will return true if the provided abort
+// callback was called when listening for cancellation on the previous context.
+func (c *cancellListener) StopListening() bool {
+	c.done <- struct{}{}
+	return c.aborted
 }
